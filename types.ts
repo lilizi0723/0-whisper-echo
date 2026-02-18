@@ -17,6 +17,10 @@ export interface Podcast {
   transcriptSummary: string; // Context for AI
   transcript: string; // Full verbatim text
   keyNodes: KeyNode[];
+  /** 远程音频地址（从 RSS 导入时有值），本地上传时由后端拼出 /uploads/... */
+  audioUrl?: string | null;
+  /** 封面图片 URL（从 RSS 导入时有值） */
+  coverImageUrl?: string | null;
 }
 
 export interface KeyNode {

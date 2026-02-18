@@ -1,0 +1,1 @@
+{"name":"whisper-echo-backend","version":"0.0.1","type":"module","scripts":{"dev":"node src/index.js","start":"node src/index.js","kill-port":"lsof -ti:8787 | xargs kill -9 2>/dev/null || true"}}

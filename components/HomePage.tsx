@@ -20,7 +20,7 @@ const HomePage: React.FC<Props> = ({ onChangeView, podcastCount, notesCount }) =
         </div>
         <div className="hidden md:block text-right">
           <p className="font-mono text-xs tracking-widest uppercase mb-1">今日会话</p>
-          <p className="font-serif text-xl">{new Date().toLocaleDateString('zh-CN', { weekday: 'long', month: 'long', day: 'numeric' })}</p>
+          <p className="font-serif text-xl">{new Date().toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric', weekday: 'long' })}</p>
         </div>
       </header>
 
@@ -50,7 +50,7 @@ const HomePage: React.FC<Props> = ({ onChangeView, podcastCount, notesCount }) =
           </div>
         </button>
 
-        {/* Notes Card - Ink Theme for Contrast */}
+        {/* Notes Card - Ink Theme for Contrast（无展开图标） */}
         <button 
           onClick={() => onChangeView(ViewState.NOTES_REPO)}
           className="flex-1 bg-ink text-paper border-2 border-ink rounded-2xl p-8 relative group transition-all duration-300 hover:-translate-y-1 hover:shadow-[8px_8px_0px_0px_#A7B89E] flex flex-col justify-between min-h-[280px]"
@@ -59,7 +59,6 @@ const HomePage: React.FC<Props> = ({ onChangeView, podcastCount, notesCount }) =
             <div className="w-14 h-14 bg-white/10 border-2 border-paper rounded-full flex items-center justify-center group-hover:bg-paper group-hover:text-ink transition-colors">
               <BookOpen className="w-6 h-6" />
             </div>
-            <ArrowUpRight className="w-6 h-6 opacity-0 group-hover:opacity-100 transition-opacity transform group-hover:translate-x-1 group-hover:-translate-y-1" />
           </div>
 
           <div className="text-left mt-8">
@@ -69,7 +68,7 @@ const HomePage: React.FC<Props> = ({ onChangeView, podcastCount, notesCount }) =
 
            <div className="w-full mt-8 pt-6 border-t border-white/20 flex justify-between items-center font-mono text-sm">
              <span>笔记数</span>
-             <span className="bg-paper text-ink px-3 py-1 rounded-full">{notesCount}</span>
+             <span className="bg-ink text-paper border border-paper px-3 py-1 rounded-full">{notesCount}</span>
           </div>
         </button>
       </div>

@@ -1,78 +1,168 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Podcast, Note, ChatMessage } from '../types';
-import { ArrowLeft, Play, Pause, SkipBack, SkipForward, Send, Sparkles, List, FileText, PenTool } from 'lucide-react';
-import { chatWithGemini } from '../services/geminiService';
+import { ArrowLeft, Play, Send, List, FileText, PenTool, Pencil, Trash2, Pause } from 'lucide-react';
+import { api } from '../services/api';
 import { MOCK_CHAT_HISTORY } from '../constants';
+
+const BULLETS = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩'];
+
+function stripNoteTimestamp(content: string): string {
+  return content.replace(/^(\s*>\s*)?\[\d{1,2}:\d{2}\]\s*/, '').trim();
+}
 
 interface Props {
   podcast: Podcast;
   existingNotes: Note[];
   onBack: () => void;
   onSaveNote: (content: string, timestamp: string) => void;
+  onUpdateNote?: (noteId: string, content: string) => void;
+  onDeleteNote?: (noteId: string) => void;
   onUpdateProgress: (id: string, progress: number) => void;
+  onUpdateTranscript?: (podcastId: string, transcript: string) => void;
   mode: 'player' | 'readOnly';
   onSwitchToPlayer: () => void;
+  isTranscribing?: boolean;
 }
 
-const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNote, onUpdateProgress, mode, onSwitchToPlayer }) => {
+function parseDurationMinutes(d: string | undefined): number {
+  const s = String(d || '0');
+  const num = parseInt(s.replace(/\D/g, ''), 10) || 0;
+  if (/^\d+:\d+$/.test(s.trim())) {
+    const [h, m] = s.split(':').map(Number);
+    return (h || 0) * 60 + (m || 0);
+  }
+  return num;
+}
+function formatProgressTime(pct: number, durationMin: number): string {
+  const totalMin = Math.max(durationMin, 1);
+  const currentMin = (pct / 100) * totalMin;
+  const m = Math.floor(currentMin);
+  const s = Math.floor((currentMin - m) * 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+function formatMmSs(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+function formatDuration(d: string | undefined): string {
+  const totalMin = parseDurationMinutes(d);
+  if (totalMin < 60) return `${totalMin}:00`;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return `${h}:${m.toString().padStart(2, '0')}`;
+}
+
+const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNote, onUpdateNote, onDeleteNote, onUpdateProgress, onUpdateTranscript, mode, onSwitchToPlayer, isTranscribing = false }) => {
   // --- Shared State ---
-  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
-
-  // --- Player Only State ---
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [progress, setProgress] = useState(podcast.progress);
-  
-  // Right Panel Tab
-  const [activeTab, setActiveTab] = useState<'notes' | 'chat'>('notes');
-  
-  // Left Panel Tab
-  const [leftTab, setLeftTab] = useState<'overview' | 'transcript'>('overview');
+  const [audioCurrentTime, setAudioCurrentTime] = useState(0);
+  const [audioDuration, setAudioDuration] = useState(0);
+  const [chatHistory, setChatHistoryState] = useState<ChatMessage[]>([]);
 
+  const setChatHistory = (updater: React.SetStateAction<ChatMessage[]>) => {
+    setChatHistoryState(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      return next;
+    });
+  };
+
+  const [progress, setProgress] = useState(podcast.progress);
+  const [leftWidth, setLeftWidth] = useState(50);
+  const [leftTab, setLeftTab] = useState<'overview' | 'transcript'>('overview');
   const [chatInput, setChatInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [noteInput, setNoteInput] = useState('');
-  const chatEndRef = useRef<HTMLDivElement>(null);
-
-  // Selection Menu State
+  const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
+  const [editingContent, setEditingContent] = useState('');
+  const [transcriptError, setTranscriptError] = useState<string | null>(null);
+  const [localTranscribing, setLocalTranscribing] = useState(false);
+  const [isDraggingProgress, setIsDraggingProgress] = useState(false);
   const [selectionMenu, setSelectionMenu] = useState<{x: number, y: number, text: string} | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
-
-  // --- Resizing State ---
-  const [leftWidth, setLeftWidth] = useState(40); // Percentage
   const containerRef = useRef<HTMLDivElement>(null);
+  const progressRef = useRef(podcast.progress);
+  const [activeTab, setActiveTab] = useState<'notes' | 'chat'>('notes');
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  const progressBarRef = useRef<HTMLDivElement>(null);
+  const rightPanelRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    // Initialize chat
-    if (chatHistory.length === 0) {
-        if (mode === 'player') {
-             setChatHistory([{
-                id: 'init',
-                role: 'model',
-                text: `欢迎来到 "${podcast.title}" 的听想空间。你可以随时问我关于本期节目的问题。`
-            }]);
-        } else {
-            setChatHistory(MOCK_CHAT_HISTORY);
-        }
+  const audioUrl = podcast.audioUrl;
+  const backendBase = typeof window !== 'undefined' && window.location.port === '3001'
+    ? `http://${window.location.hostname}:8787`
+    : '';
+  const proxyAudioUrl = audioUrl && audioUrl.startsWith('http')
+    ? (backendBase ? `${backendBase}/audio-proxy?url=${encodeURIComponent(audioUrl)}` : `/api/audio-proxy?url=${encodeURIComponent(audioUrl)}`)
+    : null;
+
+  const applyProgressFromClientX = useCallback((clientX: number, syncAudio = true) => {
+    const bar = progressBarRef.current;
+    if (!bar) return;
+    const rect = bar.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(100, ((clientX - rect.left) / rect.width) * 100));
+    const el = audioRef.current;
+    setProgress(pct);
+    progressRef.current = pct;
+    if (el && el.duration > 0 && syncAudio) {
+      el.currentTime = (pct / 100) * el.duration;
+      setAudioCurrentTime(el.currentTime);
     }
-  }, [podcast.id, mode, chatHistory.length, podcast.title]);
+  }, []);
 
-  // Save Progress on Unmount or Back
-  useEffect(() => {
-    return () => {
-        onUpdateProgress(podcast.id, progress);
-    };
-  }, [progress, podcast.id, onUpdateProgress]);
+  const [isNarrowView, setIsNarrowView] = useState(typeof window !== 'undefined' ? !window.matchMedia('(min-width: 768px)').matches : false);
+  progressRef.current = progress;
 
-  // Handle Play/Pause Simulation
   useEffect(() => {
-      let interval: ReturnType<typeof setInterval>;
-      if (isPlaying) {
-          interval = setInterval(() => {
-              setProgress(prev => Math.min(prev + 0.1, 100));
-          }, 1000);
+    const m = window.matchMedia('(min-width: 768px)');
+    const update = () => setIsNarrowView(!m.matches);
+    m.addEventListener('change', update);
+    return () => m.removeEventListener('change', update);
+  }, []);
+
+  useEffect(() => {
+    if (chatHistory.length === 0) {
+      if (mode === 'player') {
+        setChatHistoryState([{
+          id: 'init',
+          role: 'model',
+          text: `欢迎来到 "${podcast.title}" 的听想空间。你可以随时问我关于本期节目的问题。`
+        }]);
+      } else {
+        setChatHistoryState(MOCK_CHAT_HISTORY);
       }
-      return () => clearInterval(interval);
-  }, [isPlaying]);
+    }
+  }, [podcast.id, mode, podcast.title]);
+
+  useEffect(() => {
+    return () => { onUpdateProgress(podcast.id, progressRef.current); };
+  }, [podcast.id, onUpdateProgress]);
+
+  // 音频播放（拖动进度条时不覆盖）
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el || !proxyAudioUrl) return;
+    const onTimeUpdate = () => {
+      if (isDraggingProgress) return;
+      const t = el.currentTime;
+      setAudioCurrentTime(t);
+      if (el.duration > 0) {
+        const pct = (t / el.duration) * 100;
+        setProgress(pct);
+        progressRef.current = pct;
+      }
+    };
+    const onDurationChange = () => setAudioDuration(el.duration);
+    const onEnded = () => setIsPlaying(false);
+    el.addEventListener('timeupdate', onTimeUpdate);
+    el.addEventListener('durationchange', onDurationChange);
+    el.addEventListener('ended', onEnded);
+    return () => {
+      el.removeEventListener('timeupdate', onTimeUpdate);
+      el.removeEventListener('durationchange', onDurationChange);
+      el.removeEventListener('ended', onEnded);
+    };
+  }, [proxyAudioUrl, isDraggingProgress]);
 
   useEffect(() => {
     if (activeTab === 'chat') {
@@ -112,105 +202,79 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
   }, [leftTab]);
 
   const handleAddToNotes = () => {
-      if (selectionMenu) {
-          // Attempt to extract timestamp from selection (e.g., "[12:40]")
-          // If not found, use current player progress formatted
-          const timeMatch = selectionMenu.text.match(/\[(\d{2}:\d{2})\]/);
-          
-          let timestamp;
-          if (timeMatch) {
-              timestamp = timeMatch[1];
-          } else {
-              // Fallback to player time
-              const totalSeconds = parseInt(podcast.duration) * 60; // Assuming duration is "50 分钟" -> 50
-              const currentSeconds = totalSeconds * (progress / 100);
-              const m = Math.floor(currentSeconds / 60);
-              const s = Math.floor(currentSeconds % 60);
-              timestamp = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-          }
-
-          // Prepend the timestamp if it's from the player (not in text)
-          const contentPrefix = timeMatch ? '' : `[${timestamp}] `;
-          const textToAdd = `> ${contentPrefix}${selectionMenu.text}\n\n`;
-
-          setNoteInput(prev => prev ? prev + '\n' + textToAdd : textToAdd);
-          setActiveTab('notes');
-          
-          // Clear selection
-          window.getSelection()?.removeAllRanges();
-          setSelectionMenu(null);
+    if (selectionMenu) {
+      const timeMatch = selectionMenu.text.match(/\[(\d{2}:\d{2})\]/);
+      let timestamp: string;
+      if (timeMatch) {
+        timestamp = timeMatch[1];
+      } else {
+        const totalSeconds = parseInt(podcast.duration || '0') * 60;
+        const currentSeconds = totalSeconds * (progress / 100);
+        const m = Math.floor(currentSeconds / 60);
+        const s = Math.floor(currentSeconds % 60);
+        timestamp = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
       }
+      const contentPrefix = timeMatch ? '' : `[${timestamp}] `;
+      const textToAdd = `> ${contentPrefix}${selectionMenu.text}\n\n`;
+      setNoteInput(prev => prev ? prev + '\n' + textToAdd : textToAdd);
+      setSelectionMenu(null);
+    }
   };
 
-
-  const handleChatSubmit = async (e?: React.FormEvent) => {
-    e?.preventDefault();
-    if (!chatInput.trim() || isTyping) return;
-    const userText = chatInput;
+  const handleChatSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const userText = chatInput.trim();
+    if (!userText || isTyping) return;
     setChatInput('');
     setChatHistory(prev => [...prev, { id: Date.now().toString(), role: 'user', text: userText }]);
     setIsTyping(true);
     try {
-      const aiResponse = await chatWithGemini(
-        chatHistory.map(m => ({ role: m.role, text: m.text })),
-        userText,
-        podcast.transcriptSummary
-      );
-      setChatHistory(prev => [...prev, { id: (Date.now() + 1).toString(), role: 'model', text: aiResponse }]);
-    } catch (error) {
-      setChatHistory(prev => [...prev, { id: Date.now().toString(), role: 'model', text: "Connection error." }]);
+      const { text } = await api.ask({
+        history: chatHistory.map(m => ({ role: m.role, text: m.text })),
+        userMessage: userText,
+        transcriptSummary: (podcast.transcript || podcast.transcriptSummary || '').slice(0, 12000),
+      });
+      setChatHistory(prev => [...prev, { id: (Date.now() + 1).toString(), role: 'model', text }]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      let displayMsg = '抱歉，思考过程中遇到了一些问题。';
+      try {
+        const parsed = typeof msg === 'string' && msg.startsWith('{') ? JSON.parse(msg) : null;
+        if (parsed?.error) displayMsg = String(parsed.error);
+        else if (msg && msg.length < 200) displayMsg = msg;
+      } catch (_) { if (msg && msg.length < 200) displayMsg = msg; }
+      setChatHistory(prev => [...prev, {
+        id: (Date.now() + 1).toString(),
+        role: 'model',
+        text: displayMsg
+      }]);
     } finally {
       setIsTyping(false);
     }
   };
 
-  const handleNoteSubmit = (e?: React.FormEvent) => {
-    e?.preventDefault();
+  const handleSaveNote = () => {
     if (!noteInput.trim()) return;
-    
-    // Calculate current timestamp for the note metadata
-    const minutes = Math.floor((parseInt(podcast.duration) * (progress / 100)));
-    // Add seconds just for simulation variety
+    const minutes = Math.floor((parseInt(podcast.duration || '0') * (progress / 100)));
     const timestamp = `${minutes.toString().padStart(2, '0')}:00`;
-    
     onSaveNote(noteInput, timestamp);
     setNoteInput('');
   };
 
-  const handleBack = () => {
-      onUpdateProgress(podcast.id, progress);
+  const handleNoteSubmit = (e?: React.FormEvent) => {
+    e?.preventDefault();
+    handleSaveNote();
+  };
+
+  const handleBack = async () => {
+      try {
+        await onUpdateProgress(podcast.id, progressRef.current);
+      } catch (e) {
+        console.error('保存进度失败', e);
+      }
       onBack();
   };
 
-  // --- Drag Handler ---
-  const startResizing = (mouseDownEvent: React.MouseEvent) => {
-    mouseDownEvent.preventDefault();
-    
-    // Set global cursor style
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-
-    const onMouseMove = (mouseMoveEvent: MouseEvent) => {
-        if (containerRef.current) {
-            const containerRect = containerRef.current.getBoundingClientRect();
-            // Calculate percentage
-            const newLeftWidth = ((mouseMoveEvent.clientX - containerRect.left) / containerRect.width) * 100;
-            // Clamp between 25% and 75%
-            const clampedWidth = Math.min(Math.max(newLeftWidth, 25), 75);
-            setLeftWidth(clampedWidth);
-        }
-    };
-
-    const onMouseUp = () => {
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-        document.removeEventListener('mousemove', onMouseMove);
-        document.removeEventListener('mouseup', onMouseUp);
-    };
-
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-  };
 
   // --- RENDER: READ ONLY MODE ---
   if (mode === 'readOnly') {
@@ -232,43 +296,42 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
              </div>
            </div>
 
-           <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-8">
-               {/* Notes Section */}
-               <div className="space-y-6">
+           <div className="flex-1">
+               {/* Notes Section - 只保留我的笔记，删除历史对话 */}
+               <div className="space-y-6 max-w-2xl">
                     <h2 className="font-serif text-2xl border-b border-ink/20 pb-2 flex items-center gap-2">
-                        <span className="text-sage">📝</span> 我的笔记
+                        <PenTool className="w-5 h-5 text-sage" /> 我的笔记
                     </h2>
                     {existingNotes.length === 0 ? (
                         <div className="p-8 border-2 border-dashed border-ink/10 rounded-xl text-center text-subtext">
                             暂无笔记
                         </div>
                     ) : (
-                        existingNotes.map(note => (
-                            <div key={note.id} className="bg-white border border-ink/10 p-4 rounded-lg shadow-sm">
+                        existingNotes.map((note, idx) => (
+                            <div key={note.id} className="bg-white border border-ink/10 p-4 rounded-lg shadow-sm group">
                                 <div className="flex justify-between text-xs font-mono text-subtext mb-2">
-                                    <span className="bg-sage/20 text-ink px-1 rounded">{note.timestamp || '00:00'}</span>
                                     <span>{note.createdAt}</span>
+                                    {(onUpdateNote || onDeleteNote) && (
+                                        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                            {onUpdateNote && <button type="button" className="p-1 hover:bg-gray-100 rounded" title="编辑" onClick={() => { setEditingNoteId(note.id); setEditingContent(note.content); }}><Pencil className="w-3 h-3" /></button>}
+                                            {onDeleteNote && <button type="button" className="p-1 hover:bg-red-50 rounded text-red-600" title="删除" onClick={() => { if (window.confirm('确定删除这条笔记吗？')) onDeleteNote(note.id); }}><Trash2 className="w-3 h-3" /></button>}
+                                        </div>
+                                    )}
                                 </div>
-                                <p className="text-ink leading-relaxed whitespace-pre-wrap">{note.content}</p>
+                                {editingNoteId === note.id ? (
+                                    <div className="mt-2">
+                                        <textarea value={editingContent} onChange={e => setEditingContent(e.target.value)} className="w-full text-sm border border-ink/20 rounded p-2 min-h-[60px]" rows={3} />
+                                        <div className="flex justify-end gap-2 mt-2">
+                                            <button type="button" className="text-sm text-subtext" onClick={() => setEditingNoteId(null)}>取消</button>
+                                            <button type="button" className="text-sm bg-sage text-white px-3 py-1 rounded" onClick={() => { onUpdateNote?.(note.id, editingContent); setEditingNoteId(null); }}>保存</button>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <p className="text-ink leading-relaxed whitespace-pre-wrap"><span className="text-sage mr-1">{BULLETS[idx] || (idx + 1) + '.'}</span>{stripNoteTimestamp(note.content)}</p>
+                                )}
                             </div>
                         ))
                     )}
-               </div>
-
-               {/* Chat History View */}
-               <div className="space-y-6">
-                   <h2 className="font-serif text-2xl border-b border-ink/20 pb-2 flex items-center gap-2">
-                        <span className="text-sage">💬</span> 历史对话
-                   </h2>
-                   <div className="bg-card/50 rounded-xl p-4 h-[500px] overflow-y-auto space-y-4 border border-ink/5">
-                        {chatHistory.map(msg => (
-                            <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                <div className={`max-w-[85%] p-3 rounded-lg text-sm ${msg.role === 'user' ? 'bg-ink text-paper' : 'bg-white text-ink border border-ink/10'}`}>
-                                    {msg.text}
-                                </div>
-                            </div>
-                        ))}
-                   </div>
                </div>
            </div>
         </div>
@@ -276,63 +339,148 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
   }
 
   // --- RENDER: PLAYER MODE ---
+  const effectiveLeftWidth = Math.min(Math.max(leftWidth, 25), 75);
+  const leftPanelWidth = isNarrowView ? '100%' : `${effectiveLeftWidth}%`;
+  const handleResizeMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const pct = ((ev.clientX - rect.left) / rect.width) * 100;
+      setLeftWidth(Math.min(Math.max(pct, 25), 75));
+    };
+    const onMouseUp = () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  };
   return (
-    <div ref={containerRef} className="h-full flex flex-col md:flex-row bg-paper text-ink overflow-hidden relative">
+    <div ref={containerRef} className="h-full flex flex-col md:flex-row bg-paper text-ink overflow-y-auto md:overflow-hidden relative gap-0">
       
-      {/* --- Left Panel: Player & AI Context --- */}
+      {/* --- Left Panel: Player & Transcript --- */}
       <div 
-        style={{ width: `${leftWidth}%` }}
-        className="flex flex-col border-r-2 border-ink relative bg-paper z-10 transition-[width] duration-75 ease-linear h-full"
+        style={{ width: leftPanelWidth }}
+        className="flex flex-col relative bg-paper z-10 h-full min-h-0 md:min-h-full flex-shrink-0 md:flex-shrink border-r border-ink/10"
       >
         {/* Header */}
         <div className="p-6 border-b border-ink/10 flex justify-between items-center bg-paper z-20">
-             <button onClick={handleBack} className="p-2 hover:bg-gray-100 rounded-full transition-colors">
+             <button type="button" onClick={handleBack} className="p-2 hover:bg-gray-100 rounded-full transition-colors">
                 <ArrowLeft className="w-5 h-5" />
              </button>
-             <span className="font-mono text-xs uppercase tracking-widest text-subtext">Now Playing</span>
-             <div className="w-9"></div> {/* spacer */}
+             <span className="font-mono text-sm font-semibold uppercase tracking-widest text-ink">NOW PLAYING</span>
+             <div className="w-9"></div>
         </div>
 
-        <div className="flex-1 overflow-y-auto no-scrollbar relative flex flex-col">
-            
-            {/* Player Controls Area (Sticky Top) */}
-            <div className="p-6 pb-2 sticky top-0 bg-paper z-10 border-b border-ink/5 shadow-sm">
-                <div className={`w-16 h-16 ${podcast.coverColor} rounded-lg border border-ink flex items-center justify-center mb-4`}>
-                    <Play className="w-6 h-6 text-white" />
-                </div>
-                <h2 className="font-serif text-2xl font-medium leading-tight mb-1">{podcast.title}</h2>
-                <p className="text-sm text-subtext mb-6">{podcast.showName}</p>
-
-                {/* Progress Bar */}
+        <div className="p-6 pb-2 sticky top-0 bg-paper z-10 border-b border-ink/5">
+                {/* 封面 + 标题 + 创作者 */}
                 <div className="mb-4">
-                    <div className="w-full h-1 bg-gray-200 rounded-full mb-2 cursor-pointer" 
-                         onClick={(e) => {
-                             const rect = e.currentTarget.getBoundingClientRect();
-                             const x = e.clientX - rect.left;
-                             const newProgress = (x / rect.width) * 100;
-                             setProgress(Math.max(0, Math.min(100, newProgress)));
-                         }}
+                    <div className={`w-full max-w-[200px] mx-auto aspect-square rounded-lg overflow-hidden border-2 border-ink/10 mb-4 flex items-center justify-center ${podcast.coverImageUrl ? 'bg-gray-100' : podcast.coverColor || 'bg-sage/30'}`}>
+                        {podcast.coverImageUrl ? (
+                            <img src={podcast.coverImageUrl} alt="" className="w-full h-full object-cover" />
+                        ) : (
+                            <span className="font-serif text-4xl text-ink/30 italic">{(podcast.title || ' ').slice(0, 1)}</span>
+                        )}
+                    </div>
+                    <h2 className="font-serif text-xl font-medium text-ink line-clamp-2 text-center mb-1">{podcast.title}</h2>
+                    {podcast.showName && <p className="text-sm text-subtext text-center mb-4">{podcast.showName}</p>}
+                </div>
+
+                {/* 音频 */}
+                {proxyAudioUrl && (
+                  <audio
+                    ref={audioRef}
+                    src={proxyAudioUrl}
+                    preload="auto"
+                    crossOrigin="anonymous"
+                    onError={(e) => console.warn('[audio] 加载失败:', proxyAudioUrl?.slice(0, 80), e)}
+                  />
+                )}
+                <div className="mb-4">
+                    <div
+                        ref={progressBarRef}
+                        className="w-full h-3 bg-gray-200 rounded-full mb-2 cursor-pointer select-none relative"
+                        onMouseDown={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setIsDraggingProgress(true);
+                            applyProgressFromClientX(e.clientX);
+                            const onMouseMove = (ev: MouseEvent) => { ev.preventDefault(); applyProgressFromClientX(ev.clientX); };
+                            const onMouseUp = () => {
+                                const el = audioRef.current;
+                                if (el && el.duration > 0) {
+                                  el.currentTime = (progressRef.current / 100) * el.duration;
+                                  setAudioCurrentTime(el.currentTime);
+                                }
+                                setIsDraggingProgress(false);
+                                document.removeEventListener('mousemove', onMouseMove);
+                                document.removeEventListener('mouseup', onMouseUp);
+                            };
+                            document.addEventListener('mousemove', onMouseMove);
+                            document.addEventListener('mouseup', onMouseUp);
+                        }}
+                        onTouchStart={(e) => {
+                            e.preventDefault();
+                            const t = e.touches[0];
+                            if (t) { setIsDraggingProgress(true); applyProgressFromClientX(t.clientX); }
+                            const onTouchMove = (ev: TouchEvent) => {
+                                if (ev.touches[0]) applyProgressFromClientX(ev.touches[0].clientX);
+                            };
+                            const onTouchEnd = () => {
+                                const el = audioRef.current;
+                                if (el && el.duration > 0) {
+                                  el.currentTime = (progressRef.current / 100) * el.duration;
+                                  setAudioCurrentTime(el.currentTime);
+                                }
+                                setIsDraggingProgress(false);
+                                document.removeEventListener('touchmove', onTouchMove);
+                                document.removeEventListener('touchend', onTouchEnd);
+                            };
+                            document.addEventListener('touchmove', onTouchMove, { passive: true });
+                            document.addEventListener('touchend', onTouchEnd);
+                        }}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            applyProgressFromClientX(e.clientX);
+                        }}
                     >
-                        <div className="h-full bg-sage rounded-full relative" style={{ width: `${progress}%` }}>
-                            <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3 h-3 bg-ink rounded-full shadow"></div>
-                        </div>
+                        <div data-progress-fill className={`h-full bg-ink rounded-full pointer-events-none ${isDraggingProgress ? '' : 'transition-all duration-75'}`} style={{ width: `${proxyAudioUrl && audioDuration > 0 ? (audioCurrentTime / audioDuration) * 100 : progress}%` }} />
                     </div>
                     <div className="flex justify-between text-xs font-mono text-subtext">
-                        <span>{Math.floor(parseInt(podcast.duration) * (progress / 100))}:00</span>
-                        <span>{podcast.duration}</span>
+                        <span>{proxyAudioUrl && audioDuration > 0 ? formatMmSs(audioCurrentTime) : formatProgressTime(progress, parseDurationMinutes(podcast.duration))}</span>
+                        <span>{proxyAudioUrl && audioDuration > 0 ? formatMmSs(audioDuration) : formatDuration(podcast.duration)}</span>
                     </div>
                 </div>
 
-                {/* Controls */}
-                <div className="flex justify-center items-center gap-8 mb-4">
-                    <button className="text-ink hover:text-sage"><SkipBack className="w-6 h-6" /></button>
-                    <button 
-                        onClick={() => setIsPlaying(!isPlaying)}
-                        className="w-14 h-14 bg-ink text-paper rounded-full flex items-center justify-center hover:scale-105 transition-transform shadow-lg"
+                <div className="flex justify-center mb-4">
+                    <button
+                        type="button"
+                        onClick={() => {
+                            const el = audioRef.current;
+                            if (el && proxyAudioUrl) {
+                                if (isPlaying) {
+                                    el.pause();
+                                } else {
+                                    if (el.duration > 0) {
+                                        el.currentTime = (progressRef.current / 100) * el.duration;
+                                        setAudioCurrentTime(el.currentTime);
+                                    }
+                                    el.play();
+                                }
+                                setIsPlaying(!isPlaying);
+                            }
+                        }}
+                        className="w-14 h-14 rounded-full bg-ink text-paper flex items-center justify-center hover:bg-sage transition-colors disabled:opacity-50"
+                        disabled={!proxyAudioUrl}
+                        title={proxyAudioUrl ? (isPlaying ? '暂停' : '播放') : '暂无音频'}
                     >
-                        {isPlaying ? <Pause className="w-6 h-6 fill-current" /> : <Play className="w-6 h-6 fill-current" />}
+                        {isPlaying ? (
+                            <Pause className="w-6 h-6" fill="currentColor" />
+                        ) : (
+                            <Play className="w-6 h-6 ml-0.5" fill="currentColor" />
+                        )}
                     </button>
-                    <button className="text-ink hover:text-sage"><SkipForward className="w-6 h-6" /></button>
                 </div>
 
                  {/* Tab Switcher (Overview vs Transcript) */}
@@ -341,13 +489,13 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
                         onClick={() => setLeftTab('overview')}
                         className={`flex-1 flex items-center justify-center gap-2 py-2 text-sm font-medium rounded-md transition-all ${leftTab === 'overview' ? 'bg-white shadow-sm text-ink border border-ink/10' : 'text-subtext hover:text-ink'}`}
                     >
-                        <List className="w-4 h-4" /> 智能概览
+                        <List className="w-4 h-4" /> 概览
                     </button>
                     <button 
                          onClick={() => setLeftTab('transcript')}
                          className={`flex-1 flex items-center justify-center gap-2 py-2 text-sm font-medium rounded-md transition-all ${leftTab === 'transcript' ? 'bg-white shadow-sm text-ink border border-ink/10' : 'text-subtext hover:text-ink'}`}
                     >
-                        <FileText className="w-4 h-4" /> 全文逐字稿
+                        <FileText className="w-4 h-4" /> 全文
                     </button>
                 </div>
             </div>
@@ -355,52 +503,95 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
             {/* Content Area */}
             <div className="flex-1 p-6 relative">
                 {leftTab === 'overview' ? (
-                    <div className="space-y-8 animate-fade-in">
+                    <div className="space-y-4 animate-fade-in">
                         <section>
-                            <h3 className="font-serif text-lg mb-3 flex items-center gap-2">
-                                <Sparkles className="w-4 h-4 text-sage" /> AI 摘要
-                            </h3>
-                            <p className="text-sm leading-relaxed text-ink/80 bg-card/30 p-4 rounded-lg border border-ink/5 whitespace-pre-line">
-                                {podcast.transcriptSummary}
+                            <p className="text-sm leading-relaxed text-ink/80 whitespace-pre-line p-4 rounded-lg border border-ink/10 bg-card/30">
+                                {(podcast.transcriptSummary || '暂无节目简介').replace(/\]\]\s*>/g, '')}
                             </p>
-                        </section>
-
-                        <section>
-                            <h3 className="font-serif text-lg mb-3 flex items-center gap-2">
-                                <span className="text-sage">📌</span> 重点节点
-                            </h3>
-                            <div className="space-y-2">
-                                {podcast.keyNodes.map(node => (
-                                    <button 
-                                        key={node.id} 
-                                        className="w-full text-left flex gap-3 p-3 hover:bg-white border border-transparent hover:border-ink/10 rounded-lg transition-colors group"
-                                        onClick={() => {
-                                            // Extract time (e.g., 03:20) and convert to progress
-                                            const [m, s] = node.timestamp.split(':').map(Number);
-                                            const timeInMin = m + s / 60;
-                                            const totalMin = parseInt(podcast.duration);
-                                            setProgress((timeInMin / totalMin) * 100);
-                                        }}
-                                    >
-                                        <span className="font-mono text-xs text-sage pt-1">{node.timestamp}</span>
-                                        <span className="text-sm group-hover:text-sage transition-colors">{node.title}</span>
-                                    </button>
-                                ))}
-                            </div>
                         </section>
                     </div>
                 ) : (
-                    <div className="animate-fade-in pb-20 relative" ref={transcriptRef}>
-                         {/* Transcript Content */}
-                         <div className="prose prose-sm max-w-none text-ink/80 leading-relaxed font-sans whitespace-pre-wrap select-text selection:bg-sage/30">
-                            {podcast.transcript ? podcast.transcript : (
-                                <div className="text-center text-subtext py-10 italic">
-                                    暂无逐字稿
-                                </div>
-                            )}
-                         </div>
+                    <div className="animate-fade-in">
+                        {(isTranscribing || localTranscribing) ? (
+                            <div className="flex flex-col items-center justify-center py-12 text-subtext">
+                                <div className="w-10 h-10 border-2 border-sage border-t-transparent rounded-full animate-spin mb-3" />
+                                <p className="text-sm">正在转写中...</p>
+                            </div>
+                        ) : podcast.transcript ? (
+                            <div ref={transcriptRef} className="prose prose-sm max-w-none text-ink font-mono text-sm leading-relaxed space-y-2 overflow-y-auto">
+                                {podcast.transcript.split('\n').filter(l => l.trim()).map((line, i) => {
+                                    const tsMatch = line.match(/^\[(\d{1,2}:\d{2})\]\s*(Speaker\d+)?:?\s*(.+)$/);
+                                    if (tsMatch) {
+                                        const [, ts, speaker, text] = tsMatch;
+                                        const [m, s] = ts.split(':').map(Number);
+                                        const sec = (m || 0) * 60 + (s || 0);
+                                        const totalSec = Math.max(parseDurationMinutes(podcast.duration) * 60, 1);
+                                        const pct = (sec / totalSec) * 100;
+                                        return (
+                                            <button
+                                                key={i}
+                                                type="button"
+                                                className="block w-full text-left hover:bg-sage/10 p-2 rounded transition-colors"
+                                                onClick={() => {
+                                                    const el = audioRef.current;
+                                                    if (el && proxyAudioUrl && el.duration > 0) {
+                                                        el.currentTime = sec;
+                                                        setProgress(pct);
+                                                        progressRef.current = pct;
+                                                        if (!isPlaying) {
+                                                            el.play();
+                                                            setIsPlaying(true);
+                                                        }
+                                                    }
+                                                }}
+                                            >
+                                                <span className="text-sage font-mono text-xs mr-2">[{ts}]</span>
+                                                {speaker && <span className="text-subtext text-xs mr-2">{speaker}</span>}
+                                                <span className="text-ink">{text || line}</span>
+                                            </button>
+                                        );
+                                    }
+                                    return <p key={i} className="text-ink py-1">{line}</p>;
+                                })}
+                            </div>
+                        ) : (
+                            <div className="text-center text-subtext py-10">
+                                <p className="mb-4">暂无逐字稿</p>
+                                <button
+                                    type="button"
+                                    onClick={async () => {
+                                        if (!podcast.audioUrl) {
+                                            setTranscriptError('暂无音频地址');
+                                            return;
+                                        }
+                                        setTranscriptError(null);
+                                        setLocalTranscribing(true);
+                                        try {
+                                            const t = await api.transcribe(podcast.id, podcast.audioUrl);
+                                            if (t) {
+                                                onUpdateTranscript?.(podcast.id, t);
+                                                setTranscriptError(null);
+                                            } else {
+                                                setTranscriptError('转写结果为空');
+                                            }
+                                        } catch (e) {
+                                            setTranscriptError(e instanceof Error ? e.message : '转写失败');
+                                        } finally {
+                                            setLocalTranscribing(false);
+                                        }
+                                    }}
+                                    className="text-sage hover:underline"
+                                >
+                                    生成逐字稿（讯飞听见）
+                                </button>
+                                {transcriptError && <p className="text-sm text-red-600 mt-3">{transcriptError}</p>}
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
 
-                         {/* Highlight Popover */}
+            {/* Highlight Popover */}
                          {selectionMenu && (
                             <div 
                                 style={{ 
@@ -420,26 +611,20 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
                                 <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-ink rotate-45"></div>
                             </div>
                          )}
-                    </div>
-                )}
-            </div>
-        </div>
+
       </div>
 
-      {/* --- Drag Handle --- */}
-      <div 
-        className="w-1 hover:w-2 bg-transparent hover:bg-sage/50 cursor-col-resize z-50 absolute h-full transition-all flex items-center justify-center group"
-        style={{ left: `${leftWidth}%`, transform: 'translateX(-50%)' }}
-        onMouseDown={startResizing}
-      >
-        <div className="h-8 w-1 bg-ink/20 rounded-full group-hover:bg-ink/50 transition-colors"></div>
-      </div>
-
+      {/* --- Resizable divider --- */}
+      <div
+        className="hidden md:flex w-1 hover:w-2 bg-transparent hover:bg-sage/50 cursor-col-resize z-50 absolute h-full transition-all items-center justify-center group"
+        style={{ left: `${effectiveLeftWidth}%`, transform: 'translateX(-50%)' }}
+        onMouseDown={handleResizeMouseDown}
+      />
 
       {/* --- Right Panel: User Notes & Chat --- */}
-      <div className="flex-1 flex flex-col bg-[#FDFBF7] h-full">
+      <div ref={rightPanelRef} className="flex-1 flex flex-col bg-[#FDFBF7] min-h-0 min-w-0 md:min-w-[280px] flex-shrink-0 self-stretch">
          {/* Tabs */}
-         <div className="flex border-b border-ink/10 bg-paper">
+         <div className="flex flex-shrink-0 border-b border-ink/10 bg-paper">
              <button 
                 onClick={() => setActiveTab('notes')}
                 className={`flex-1 py-4 text-sm font-medium border-b-2 transition-colors ${activeTab === 'notes' ? 'border-ink text-ink bg-[#FDFBF7]' : 'border-transparent text-subtext bg-paper hover:bg-gray-50'}`}
@@ -454,23 +639,34 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
              </button>
          </div>
 
-         {/* Content */}
-         <div className="flex-1 overflow-y-auto p-6 relative">
+         {/* Content - chat 时贯穿到底，无底部留白 */}
+         <div className={`flex-1 flex flex-col min-h-0 self-stretch ${activeTab === 'chat' ? 'overflow-hidden pt-6 px-6 pb-0' : 'overflow-y-auto p-6'}`}>
              {activeTab === 'notes' ? (
                  <div className="h-full flex flex-col">
                      <div className="flex-1 space-y-4 mb-4">
-                        {existingNotes.length === 0 ? (
-                            <div className="text-center text-subtext mt-10 text-sm">
-                                点击左侧“+”或直接输入记录想法...
-                            </div>
-                        ) : (
-                            existingNotes.map(note => (
+                        {existingNotes.length === 0 ? null : (
+                            [...existingNotes].reverse().map((note, idx) => (
                                 <div key={note.id} className="group relative pl-4 border-l-2 border-sage/30 hover:border-sage transition-colors">
                                      <div className="flex justify-between items-baseline mb-1">
-                                        <span className="font-mono text-[10px] text-sage">{note.timestamp || '00:00'}</span>
                                         <span className="text-[10px] text-subtext">{note.createdAt}</span>
+                                        {(onUpdateNote || onDeleteNote) && (
+                                            <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                {onUpdateNote && <button type="button" className="p-1 hover:bg-gray-100 rounded" title="编辑" onClick={() => { setEditingNoteId(note.id); setEditingContent(note.content); }}><Pencil className="w-3 h-3" /></button>}
+                                                {onDeleteNote && <button type="button" className="p-1 hover:bg-red-50 rounded text-red-600" title="删除" onClick={() => { if (window.confirm('确定删除这条笔记吗？')) onDeleteNote(note.id); }}><Trash2 className="w-3 h-3" /></button>}
+                                            </div>
+                                        )}
                                      </div>
-                                     <p className="text-sm text-ink whitespace-pre-wrap">{note.content}</p>
+                                     {editingNoteId === note.id ? (
+                                        <div className="mt-2">
+                                            <textarea value={editingContent} onChange={e => setEditingContent(e.target.value)} className="w-full text-sm border border-ink/20 rounded p-2 min-h-[60px]" rows={3} />
+                                            <div className="flex justify-end gap-2 mt-2">
+                                                <button type="button" className="text-sm text-subtext" onClick={() => setEditingNoteId(null)}>取消</button>
+                                                <button type="button" className="text-sm bg-sage text-white px-3 py-1 rounded" onClick={() => { onUpdateNote?.(note.id, editingContent); setEditingNoteId(null); }}>保存</button>
+                                            </div>
+                                        </div>
+                                     ) : (
+                                        <p className="text-sm text-ink whitespace-pre-wrap"><span className="text-sage mr-1">{BULLETS[idx] || (idx + 1) + '.'}</span>{stripNoteTimestamp(note.content)}</p>
+                                     )}
                                 </div>
                             ))
                         )}
@@ -490,10 +686,7 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
                                 }
                             }}
                         />
-                        <div className="flex justify-between items-center mt-2 border-t border-gray-100 pt-2">
-                             <span className="text-[10px] text-subtext font-mono">
-                                 {Math.floor((parseInt(podcast.duration) * (progress / 100)))}:00
-                             </span>
+                        <div className="flex justify-end items-center mt-2 border-t border-gray-100 pt-2 note-form-footer">
                              <button type="submit" disabled={!noteInput.trim()} className="bg-ink text-paper rounded-full p-2 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-sage transition-colors">
                                  <Send className="w-3 h-3" />
                              </button>
@@ -501,45 +694,39 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
                      </form>
                  </div>
              ) : (
-                <div className="h-full flex flex-col">
-                    {/* Chat History */}
-                    <div className="flex-1 space-y-4 mb-4 overflow-y-auto no-scrollbar pr-2">
-                        {chatHistory.map((msg) => (
-                            <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                <div className={`max-w-[85%] p-3 rounded-2xl text-sm leading-relaxed ${
-                                    msg.role === 'user' 
-                                    ? 'bg-ink text-paper rounded-br-none' 
-                                    : 'bg-white border border-ink/10 text-ink rounded-bl-none shadow-sm'
-                                }`}>
-                                    {msg.text}
-                                </div>
+                <div className="flex flex-col flex-1 min-h-0 w-full">
+                  <div className="flex-1 overflow-y-auto min-h-0 -mx-6 px-6">
+                    {chatHistory.map(msg => (
+                        <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} mb-3`}>
+                            <div className={`max-w-[85%] p-3 rounded-lg text-sm ${msg.role === 'user' ? 'bg-ink text-paper rounded-br-none whitespace-pre-wrap' : 'bg-white border border-ink/10 text-ink rounded-bl-none shadow-sm whitespace-pre-wrap'}`}>
+                                {msg.role === 'user' ? msg.text : msg.text}
                             </div>
-                        ))}
-                        {isTyping && (
-                            <div className="flex justify-start">
-                                <div className="bg-white border border-ink/10 px-4 py-3 rounded-2xl rounded-bl-none shadow-sm flex gap-1 items-center">
-                                    <div className="w-1.5 h-1.5 bg-ink/40 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
-                                    <div className="w-1.5 h-1.5 bg-ink/40 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-                                    <div className="w-1.5 h-1.5 bg-ink/40 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
-                                </div>
+                        </div>
+                    ))}
+                    {isTyping && (
+                        <div className="flex justify-start mb-3">
+                            <div className="bg-white border border-ink/10 px-4 py-3 rounded-2xl rounded-bl-none shadow-sm flex gap-1 items-center">
+                                <div className="w-1.5 h-1.5 bg-ink/40 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                                <div className="w-1.5 h-1.5 bg-ink/40 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                                <div className="w-1.5 h-1.5 bg-ink/40 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
                             </div>
-                        )}
-                        <div ref={chatEndRef} />
-                    </div>
-
-                    {/* Chat Input */}
-                    <form onSubmit={handleChatSubmit} className="mt-auto bg-white border border-ink/10 rounded-xl p-1 pl-4 shadow-sm focus-within:ring-1 focus-within:ring-sage focus-within:border-sage transition-all flex items-center gap-2">
-                    <input 
-                        type="text"
-                        value={chatInput}
-                        onChange={e => setChatInput(e.target.value)}
-                        placeholder="向 AI 提问..."
-                        className="flex-1 text-sm outline-none bg-transparent placeholder:text-subtext/50 py-3"
+                        </div>
+                    )}
+                    <div ref={chatEndRef} />
+                  </div>
+                  {/* Chat Input - 固定在底部，无下方留白 */}
+                  <form onSubmit={handleChatSubmit} className="flex-shrink-0 mt-4 bg-white border border-ink/10 rounded-xl p-1 pl-4 shadow-sm focus-within:ring-1 focus-within:ring-sage focus-within:border-sage transition-all flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={chatInput}
+                      onChange={e => setChatInput(e.target.value)}
+                      placeholder="向 AI 提问..."
+                      className="flex-1 text-sm outline-none bg-transparent placeholder:text-subtext/50 py-3"
                     />
                     <button type="submit" disabled={!chatInput.trim() || isTyping} className="bg-ink text-paper rounded-lg p-2 m-1 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-sage transition-colors">
-                            <Send className="w-4 h-4" />
+                      <Send className="w-4 h-4" />
                     </button>
-                    </form>
+                  </form>
                 </div>
              )}
          </div>

@@ -1,8 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 
-const apiKey = process.env.API_KEY || '';
-
-const ai = new GoogleGenAI({ apiKey });
+const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY || '';
 
 export const chatWithGemini = async (
   history: { role: 'user' | 'model'; text: string }[],
@@ -10,10 +8,11 @@ export const chatWithGemini = async (
   context: string
 ): Promise<string> => {
   if (!apiKey) {
-    return "API Key is missing. Please configure the environment.";
+    return "API Key 未配置，请在 .env.local 中设置 GEMINI_API_KEY。";
   }
 
   try {
+    const ai = new GoogleGenAI({ apiKey });
     const systemInstruction = `你是嵌入在播客播放器 "Whisper & Echo" 中的 AI 助手。
     你可以访问当前单集的逐字稿摘要。
     请根据上下文回答用户的问题。

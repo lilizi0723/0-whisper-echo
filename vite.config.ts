@@ -6,10 +6,18 @@ export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
     return {
       server: {
-        port: 3000,
+        port: 3001,
+        strictPort: true,
         host: '0.0.0.0',
+        proxy: {
+          '/api': { target: 'http://localhost:8787', changeOrigin: true, rewrite: (p) => p.replace(/^\/api/, '/') },
+          '/audio-proxy': { target: 'http://localhost:8787', changeOrigin: true },
+        },
       },
       plugins: [react()],
+      optimizeDeps: {
+        include: ['react-markdown'],
+      },
       define: {
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
         'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)

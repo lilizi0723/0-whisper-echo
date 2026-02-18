@@ -39,6 +39,10 @@
       }
     </script>
     <style>
+      html, body, #root {
+        height: 100%;
+        margin: 0;
+      }
       body {
         background-color: #FAF7F2;
         color: #1a1a1a;
@@ -50,6 +54,10 @@
       .no-scrollbar {
         -ms-overflow-style: none;
         scrollbar-width: none;
+      }
+      /* 笔记输入框底部只保留发送按钮，隐藏时间戳 */
+      .note-form-footer > *:not(button) {
+        display: none !important;
       }
     </style>
   <script type="importmap">
@@ -66,5 +74,6 @@
 </head>
   <body>
     <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
   </body>
 </html>

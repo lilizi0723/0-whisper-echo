@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { ViewState, Podcast, Note } from './types';
-import { MOCK_PODCASTS, MOCK_NOTES } from './constants';
+import { api } from './services/api';
 
 // Components
 import LandingPage from './components/LandingPage';
@@ -9,16 +9,50 @@ import PodcastListPage from './components/PodcastListPage';
 import NotesPage from './components/NotesPage';
 import PlayerPage from './components/PlayerPage';
 
+const STORAGE_KEY_PODCASTS = 'whisper-echo-podcasts';
+const STORAGE_KEY_NOTES = 'whisper-echo-notes';
+
+function loadPodcasts(): Podcast[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_PODCASTS);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function loadNotes(): Note[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_NOTES);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 const App: React.FC = () => {
-  // Global State
+  // Global State（从 localStorage 初始化）
   const [view, setView] = useState<ViewState>(ViewState.LANDING);
-  const [podcasts, setPodcasts] = useState<Podcast[]>(MOCK_PODCASTS);
-  const [notes, setNotes] = useState<Note[]>(MOCK_NOTES);
-  // Lifted category state
-  const [categories, setCategories] = useState(['产品思维', '科技', '职场']);
+  const [podcasts, setPodcasts] = useState<Podcast[]>(() => loadPodcasts());
+  const [notes, setNotes] = useState<Note[]>(() => loadNotes());
+
+  // 持久化 podcasts
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY_PODCASTS, JSON.stringify(podcasts));
+  }, [podcasts]);
+
+  // 持久化 notes 到笔记仓库
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(notes));
+  }, [notes]);
   
   const [selectedPodcast, setSelectedPodcast] = useState<Podcast | null>(null);
-  
+  const [transcribingIds, setTranscribingIds] = useState<Set<string>>(new Set());
+
   // Track which mode the player is in
   const [playerMode, setPlayerMode] = useState<'player' | 'readOnly'>('player');
 
@@ -61,35 +95,61 @@ const App: React.FC = () => {
     setNotes(prev => [newNote, ...prev]);
   };
 
-  const handleUpdateProgress = (id: string, progress: number) => {
-    setPodcasts(prev => prev.map(p => p.id === id ? { ...p, progress } : p));
+  const handleUpdateNote = (noteId: string, content: string) => {
+    setNotes(prev => prev.map(n => n.id === noteId ? { ...n, content } : n));
+  };
+
+  const handleDeleteNote = (noteId: string) => {
+    setNotes(prev => prev.filter(n => n.id !== noteId));
+  };
+
+  const handleUpdateTranscript = (id: string, transcript: string) => {
+    setPodcasts(prev => prev.map(p => p.id === id ? { ...p, transcript } : p));
     if (selectedPodcast?.id === id) {
-        setSelectedPodcast(prev => prev ? { ...prev, progress } : null);
+      setSelectedPodcast(prev => prev ? { ...prev, transcript } : null);
     }
   };
 
-  const handleCreateCategory = (name: string) => {
-    if (!categories.includes(name)) {
-        setCategories([...categories, name]);
-    }
-  };
+  const handleUpdateProgress = useCallback((id: string, progress: number) => {
+    setPodcasts(prev => prev.map(p => p.id === id ? { ...p, progress } : p));
+    setSelectedPodcast(prev => prev?.id === id ? (prev ? { ...prev, progress } : null) : prev);
+  }, []);
 
-  const handleRenameCategory = (oldName: string, newName: string) => {
-      setCategories(prev => prev.map(c => c === oldName ? newName : c));
-      // Update podcasts associated with this category
-      setPodcasts(prev => prev.map(p => p.category === oldName ? { ...p, category: newName } : p));
-  };
-
-  const handleDeleteCategory = (categoryName: string, deletePodcasts: boolean) => {
-      setCategories(prev => prev.filter(c => c !== categoryName));
-      
-      if (deletePodcasts) {
-          // Cascade delete
-          setPodcasts(prev => prev.filter(p => p.category !== categoryName));
-      } else {
-          // Move to '其他' (Other/Uncategorized)
-          setPodcasts(prev => prev.map(p => p.category === categoryName ? { ...p, category: '其他' } : p));
+  const handlePodcastImported = (podcast: Podcast) => {
+      setPodcasts(prev => [...prev, podcast]);
+      console.log('[导入] 已加入我的播客:', podcast.title);
+      if (podcast.audioUrl) {
+        setTranscribingIds(prev => new Set(prev).add(podcast.id));
+        api.transcribe(podcast.id, podcast.audioUrl).then(t => {
+          if (t) handleUpdateTranscript(podcast.id, t);
+        }).finally(() => {
+          setTranscribingIds(prev => { const s = new Set(prev); s.delete(podcast.id); return s; });
+        });
       }
+  };
+
+  /** 导入成功后从后端刷新列表（确保新播客显示） */
+  const refreshFromBackend = async () => {
+    try {
+      const list = await api.getPodcasts();
+      if (list.length > 0) {
+        const mapped: Podcast[] = list.map((p) => ({
+          id: p.id,
+          title: p.title,
+          showName: p.showName,
+          duration: p.duration,
+          coverColor: p.coverColor ?? 'bg-sage/30',
+          progress: p.progress ?? 0,
+          category: p.category ?? '',
+          transcriptSummary: p.transcriptSummary ?? '',
+          transcript: p.transcript ?? '',
+          keyNodes: p.keyNodes ?? [],
+          audioUrl: p.audioUrl ?? null,
+          coverImageUrl: p.coverImageUrl ?? null,
+        }));
+        setPodcasts(mapped);
+      }
+    } catch (_) {}
   };
 
   const handleDeletePodcast = (podcastId: string) => {
@@ -116,13 +176,11 @@ const App: React.FC = () => {
         return (
           <PodcastListPage 
             podcasts={podcasts} 
-            categories={categories}
             onBack={() => setView(ViewState.HOME)} 
             onSelectPodcast={handleSelectPodcastForListening}
-            onCreateCategory={handleCreateCategory}
-            onRenameCategory={handleRenameCategory}
-            onDeleteCategory={handleDeleteCategory}
             onDeletePodcast={handleDeletePodcast}
+            onPodcastImported={handlePodcastImported}
+            onImportSuccess={refreshFromBackend}
           />
         );
       
@@ -144,9 +202,13 @@ const App: React.FC = () => {
             existingNotes={notes.filter(n => n.podcastId === selectedPodcast.id)}
             onBack={() => setView(playerMode === 'readOnly' ? ViewState.NOTES_REPO : ViewState.PODCAST_LIST)}
             onSaveNote={handleSaveNote}
+            onUpdateNote={handleUpdateNote}
+            onDeleteNote={handleDeleteNote}
             onUpdateProgress={handleUpdateProgress}
+            onUpdateTranscript={handleUpdateTranscript}
             mode={playerMode}
             onSwitchToPlayer={handleSwitchToPlayer}
+            isTranscribing={transcribingIds.has(selectedPodcast.id)}
           />
         );
         
