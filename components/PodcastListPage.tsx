@@ -22,6 +22,7 @@ const PodcastListPage: React.FC<Props> = ({
     onImportSuccess
 }) => {
   const [showImportModal, setShowImportModal] = useState(false);
+  const [deletePodcastId, setDeletePodcastId] = useState<string | null>(null);
   const [rssUrl, setRssUrl] = useState('');
   const [rssLoading, setRssLoading] = useState(false);
   const [rssError, setRssError] = useState<string | null>(null);
@@ -61,7 +62,7 @@ const PodcastListPage: React.FC<Props> = ({
           >
             {/* Delete Button (Visible on Hover) */}
             <button 
-                onClick={(e) => { e.stopPropagation(); onDeletePodcast(podcast.id); }}
+                onClick={(e) => { e.stopPropagation(); setDeletePodcastId(podcast.id); }}
                 className="absolute top-4 right-4 p-2 text-subtext hover:text-red-500 hover:bg-red-50 rounded-full opacity-0 group-hover:opacity-100 transition-all z-20"
                 title="删除节目"
             >
@@ -99,6 +100,19 @@ const PodcastListPage: React.FC<Props> = ({
            </div>
         )}
       </div>
+
+      {/* Delete Podcast Confirm Modal */}
+      {deletePodcastId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/20" onClick={() => setDeletePodcastId(null)}>
+          <div className="bg-paper rounded-xl border-2 border-ink p-6 shadow-xl max-w-sm mx-4" onClick={e => e.stopPropagation()}>
+            <p className="text-ink mb-4">确定删除这个播客吗？同时会删除该播客下的所有笔记。</p>
+            <div className="flex gap-3 justify-end">
+              <button type="button" className="px-4 py-2 border border-ink/20 rounded-lg hover:bg-gray-100" onClick={() => setDeletePodcastId(null)}>取消</button>
+              <button type="button" className="px-4 py-2 bg-ink text-paper rounded-lg hover:bg-sage" onClick={() => { onDeletePodcast(deletePodcastId); setDeletePodcastId(null); }}>确定删除</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Stylized Import Modal */}
       {showImportModal && (
@@ -186,6 +200,7 @@ const PodcastListPage: React.FC<Props> = ({
                                   setRssError('该播客已经存在');
                                   return;
                                 }
+                                const ts = epAny.contentSnippet ?? '';
                                 const newPodcast: Podcast = {
                                   id: `rss-${Date.now()}-${epIndex}`,
                                   title: ep.title,
@@ -194,12 +209,16 @@ const PodcastListPage: React.FC<Props> = ({
                                   coverColor: 'bg-sage/30',
                                   progress: 0,
                                   category: '',
-                                  transcriptSummary: epAny.contentSnippet ?? '',
+                                  transcriptSummary: ts,
                                   transcript: '',
                                   keyNodes: [],
                                   audioUrl: epAny.audioUrl ?? null,
                                   coverImageUrl: epAny.coverImageUrl ?? null,
                                 };
+
+                                // #region agent log
+                                fetch('http://127.0.0.1:7242/ingest/8b5eb1f5-e3dc-4b71-ac73-fe8b2e3dde28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PodcastListPage:import',message:'Frontend import',data:{tsLen:ts.length,has4130:ts.includes('41:30'),has4959:ts.includes('49:19')},timestamp:Date.now(),hypothesisId:'H3'})}).catch(()=>{});
+                                // #endregion
 
                                 // 2. 同步写入父组件 state（会触发 localStorage 持久化）
                                 onPodcastImported(newPodcast);

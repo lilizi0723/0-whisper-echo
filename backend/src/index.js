@@ -1,6 +1,21 @@
 import http from 'http';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { Readable } from 'stream';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import crypto from 'crypto';
+import { XMLParser } from 'fast-xml-parser';
+
+const DEBUG_LOG = process.env.DEBUG_LOG_PATH || path.join(__dirname, '..', '..', '.cursor', 'debug.log');
+function debugLog(payload) {
+  try {
+    const dir = path.dirname(DEBUG_LOG);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(DEBUG_LOG, JSON.stringify(payload) + '\n');
+  } catch (_) {}
+}
 
 const PORT = 8787;
 const XFYUN_APP_ID = '1aebbbfc';
@@ -41,37 +56,74 @@ function resolveUrl(base, relative) {
     return relative;
   }
 }
-function parseRssXml(text, feedUrl = '') {
-  const showNameMatch = text.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-  const showName = showNameMatch ? extractCdataOrText(showNameMatch[1]) : '播客节目';
-  const feedImgMatch = text.match(/<itunes:image[^>]+href=["']([^"']+)["']/i) || text.match(/<image[^>]*>[\s\S]*?<url[^>]*>([^<]+)<\/url>/i);
-  const feedImage = feedImgMatch ? (feedImgMatch[1] || '').trim() : null;
-  const itemRegex = /<item[^>]*>([\s\S]*?)<\/item>/gi;
-  const episodes = [];
-  let idx = 0;
-  let m;
-  while ((m = itemRegex.exec(text)) !== null) {
-    const block = m[1];
-    const titleMatch = block.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-    const itunesTitleMatch = block.match(/<itunes:title[^>]*>([\s\S]*?)<\/itunes:title>/i);
-    let title = (titleMatch ? extractCdataOrText(titleMatch[1]) : '') || (itunesTitleMatch ? extractCdataOrText(itunesTitleMatch[1]) : '') || `Episode ${idx + 1}`;
-    const pubMatch = block.match(/<pubDate[^>]*>([^<]+)<\/pubDate>/i) || block.match(/<dc:date[^>]*>([^<]+)</i);
-    const encMatch = block.match(/<enclosure[^>]+url=["']([^"']+)["'][^>]*>/i) || block.match(/<enclosure[^>]+url=["']([^"']+)["']/i);
-    const durMatch = block.match(/<itunes:duration[^>]*>([^<]+)<\/itunes:duration>/i);
-    const itemImgMatch = block.match(/<itunes:image[^>]+href=["']([^"']+)["']/i) || block.match(/<media:thumbnail[^>]+url=["']([^"']+)["']/i);
-    const descMatch = block.match(/<description[^>]*>([\s\S]*)<\/description>/i) || block.match(/<content:encoded[^>]*>([\s\S]*)<\/content:encoded>/i) || block.match(/<itunes:summary[^>]*>([\s\S]*)<\/itunes:summary>/i);
-    const pubDate = pubMatch ? pubMatch[1].trim() : '';
-    let audioUrl = encMatch ? encMatch[1].trim() : null;
-    if (audioUrl && feedUrl) audioUrl = resolveUrl(feedUrl, audioUrl);
-    const durationRaw = durMatch ? durMatch[1].trim() : null;
-    const duration = formatDuration(durationRaw) || (durationRaw ? String(durationRaw) : null);
-    const coverImage = itemImgMatch ? itemImgMatch[1].trim() : feedImage;
-    const rawDesc = descMatch ? descMatch[1] : '';
-    let contentSnippet = rawDesc ? (extractCdataOrText(rawDesc) || stripHtml(rawDesc)) : '';
-    contentSnippet = contentSnippet.replace(/\]\]\s*>/g, '');
-    episodes.push({ index: idx, title, pubDate, audioUrl, duration: duration || null, coverImageUrl: coverImage || null, contentSnippet: contentSnippet || null });
-    idx++;
+function getTextOrCdata(val) {
+  if (val == null || val === '') return '';
+  if (typeof val === 'string') return val.trim();
+  if (typeof val === 'object') {
+    if ('#text' in val) return String(val['#text'] || '').trim();
+    const cdata = val['__cdata'] ?? val['#cdata-section'];
+    if (cdata != null) return String(cdata).trim();
   }
+  return String(val).trim();
+}
+
+function parseRssXml(text, feedUrl = '') {
+  const parser = new XMLParser({ ignoreAttributes: false, trimValues: true, cdataPropName: '__cdata' });
+  let json;
+  try {
+    json = parser.parse(text);
+  } catch (e) {
+    return { showName: '播客节目', episodes: [] };
+  }
+  const rss = json?.rss || json?.feed || json;
+  const channel = rss?.channel || rss;
+  if (!channel) return { showName: '播客节目', episodes: [] };
+
+  const showName = getTextOrCdata(channel.title) || '播客节目';
+  const feedImg = channel['itunes:image'] || channel.image;
+  const feedImage = (feedImg && (typeof feedImg === 'string' ? feedImg : feedImg['@_href'] || feedImg.url)) || null;
+
+  let items = channel.item || channel.entries || [];
+  if (!Array.isArray(items)) items = items ? [items] : [];
+  const episodes = items.map((item, idx) => {
+    const title = getTextOrCdata(item.title || item['itunes:title']) || `Episode ${idx + 1}`;
+    const pubDate = getTextOrCdata(item.pubDate || item.published || item['dc:date']) || '';
+    const enc = item.enclosure;
+    let audioUrl = enc && (enc['@_url'] || enc.url) ? (enc['@_url'] || enc.url) : null;
+    if (audioUrl && feedUrl) audioUrl = resolveUrl(feedUrl, audioUrl);
+    const durationRaw = getTextOrCdata(item['itunes:duration']);
+    const duration = formatDuration(durationRaw) || (durationRaw ? String(durationRaw) : null);
+    const itemImg = item['itunes:image'] || item.image;
+    const coverImage = (itemImg && (typeof itemImg === 'string' ? itemImg : itemImg['@_href'] || itemImg.url)) || feedImage;
+
+    const contentKeys = ['description', 'content:encoded', 'encoded', 'itunes:summary', 'media:description', 'dc:description'];
+    const contentCandidates = contentKeys.map((k) => getTextOrCdata(item[k]));
+    const nestedEnc = item.content && typeof item.content === 'object' ? getTextOrCdata(item.content.encoded ?? item.content) : '';
+    contentCandidates.push(nestedEnc);
+    const rawParts = contentCandidates.filter((x) => x && x.length > 0);
+    const rawDesc = rawParts.length ? rawParts.reduce((a, b) => (a.length >= b.length ? a : b), '') : '';
+    let contentSnippet = rawDesc ? (stripHtml(rawDesc) || rawDesc) : '';
+    contentSnippet = contentSnippet.replace(/\]\]\s*>/g, '').trim();
+
+    // #region agent log
+    if (idx === 0) {
+      const pl = {location:'index.js:parseRssXml',message:'RSS parse episode 0',data:{rawDescLen:rawDesc.length,contentSnippetLen:contentSnippet.length,has3756:rawDesc.includes('37:56'),has4130:rawDesc.includes('41:30'),has4959:rawDesc.includes('49:19'),last200:contentSnippet.slice(-200)},timestamp:Date.now(),hypothesisId:'H1'};
+      debugLog(pl);
+      fetch('http://127.0.0.1:7242/ingest/8b5eb1f5-e3dc-4b71-ac73-fe8b2e3dde28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(pl)}).catch(()=>{});
+    }
+    // #endregion
+
+    return {
+      index: idx,
+      title,
+      pubDate,
+      audioUrl,
+      duration: duration || null,
+      coverImageUrl: coverImage || null,
+      contentSnippet: contentSnippet || null,
+    };
+  });
+
   return { showName, episodes };
 }
 
@@ -149,6 +201,14 @@ const server = http.createServer(async (req, res) => {
       if (!resp.ok) throw new Error(`RSS fetch failed: ${resp.status}`);
       const xml = await resp.text();
       const data = parseRssXml(xml, rssUrl);
+      // #region agent log
+      const ep0 = data.episodes?.[0];
+      if (ep0) {
+        const pl = {location:'index.js:rss-preview',message:'API response ep0',data:{contentSnippetLen:ep0.contentSnippet?.length??0,has4130:!!ep0.contentSnippet?.includes('41:30'),has4959:!!ep0.contentSnippet?.includes('49:19')},timestamp:Date.now(),hypothesisId:'H2'};
+        debugLog(pl);
+        fetch('http://127.0.0.1:7242/ingest/8b5eb1f5-e3dc-4b71-ac73-fe8b2e3dde28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(pl)}).catch(()=>{});
+      }
+      // #endregion
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(data));
     } catch (e) {
@@ -351,4 +411,7 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ error: 'Not found', path: url.pathname }));
 });
 
-server.listen(PORT, () => console.log(`Backend http://localhost:${PORT}`));
+server.listen(PORT, () => {
+  debugLog({ location: 'index.js:startup', message: 'Backend started', data: { port: PORT, debugLogPath: DEBUG_LOG }, timestamp: Date.now() });
+  console.log(`Backend http://localhost:${PORT}`);
+});

@@ -338,9 +338,9 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
              </div>
            </div>
 
-           <div className="flex-1">
+           <div className="flex-1 w-full max-w-full">
                {/* Notes Section - 只保留我的笔记，删除历史对话 */}
-               <div className="space-y-6 max-w-2xl">
+               <div className="space-y-6 w-full">
                     <h2 className="font-serif text-2xl border-b border-ink/20 pb-2 flex items-center gap-2">
                         <PenTool className="w-5 h-5 text-sage" /> 我的笔记
                     </h2>
@@ -361,8 +361,8 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
                                     )}
                                 </div>
                                 {editingNoteId === note.id ? (
-                                    <div className="mt-2">
-                                        <textarea value={editingContent} onChange={e => setEditingContent(e.target.value)} className="w-full text-sm border border-ink/20 rounded p-2 min-h-[60px]" rows={3} />
+                                    <div className="mt-2" onClick={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()}>
+                                        <textarea value={editingContent} onChange={e => setEditingContent(e.target.value)} autoFocus className="w-full text-sm border border-ink/20 rounded p-2 min-h-[60px] bg-white" rows={3} />
                                         <div className="flex justify-end gap-2 mt-2">
                                             <button type="button" className="text-sm text-subtext" onClick={() => setEditingNoteId(null)}>取消</button>
                                             <button type="button" className="text-sm bg-sage text-white px-3 py-1 rounded" onClick={() => { onUpdateNote?.(note.id, editingContent); setEditingNoteId(null); }}>保存</button>
@@ -426,18 +426,18 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
              <div className="w-9"></div>
         </div>
 
-        <div className="p-6 pb-2 sticky top-0 bg-paper z-10 border-b border-ink/5">
+        <div className="px-6 pt-3 pb-2 sticky top-0 bg-paper z-10 border-b border-ink/5">
                 {/* 封面 + 标题 + 创作者 */}
-                <div className="mb-4">
-                    <div className={`w-full max-w-[200px] mx-auto aspect-square rounded-lg overflow-hidden border-2 border-ink/10 mb-4 flex items-center justify-center ${podcast.coverImageUrl ? 'bg-gray-100' : podcast.coverColor || 'bg-sage/30'}`}>
+                <div className="mb-2">
+                    <div className={`w-full max-w-[160px] mx-auto aspect-square rounded-lg overflow-hidden border-2 border-ink/10 mb-2 flex items-center justify-center ${podcast.coverImageUrl ? 'bg-gray-100' : podcast.coverColor || 'bg-sage/30'}`}>
                         {podcast.coverImageUrl ? (
                             <img src={podcast.coverImageUrl} alt="" className="w-full h-full object-cover" />
                         ) : (
-                            <span className="font-serif text-4xl text-ink/30 italic">{(podcast.title || ' ').slice(0, 1)}</span>
+                            <span className="font-serif text-3xl text-ink/30 italic">{(podcast.title || ' ').slice(0, 1)}</span>
                         )}
                     </div>
-                    <h2 className="font-serif text-xl font-medium text-ink line-clamp-2 text-center mb-1">{podcast.title}</h2>
-                    {podcast.showName && <p className="text-sm text-subtext text-center mb-4">{podcast.showName}</p>}
+                    <h2 className="font-serif text-lg font-medium text-ink line-clamp-2 text-center mb-0.5">{podcast.title}</h2>
+                    {podcast.showName && <p className="text-xs text-subtext text-center mb-2">{podcast.showName}</p>}
                 </div>
 
                 {/* 音频 */}
@@ -450,10 +450,44 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
                     onError={(e) => console.warn('[audio] 加载失败:', proxyAudioUrl?.slice(0, 80), e)}
                   />
                 )}
-                <div className="mb-4">
+                <div className="flex items-center gap-2.5 mb-2">
+                    <button
+                        type="button"
+                        onClick={() => {
+                            const el = audioRef.current;
+                            if (!el || !proxyAudioUrl) return;
+                            if (isPlaying) {
+                                el.pause();
+                                setIsPlaying(false);
+                            } else {
+                                setIsPlaying(true);
+                                const dur = el.duration;
+                                const pct = progressRef.current;
+                                if (dur > 0 && isFinite(dur)) {
+                                    const targetTime = (pct / 100) * dur;
+                                    el.currentTime = targetTime;
+                                    setAudioCurrentTime(targetTime);
+                                    lastSeekRef.current = { pct, at: Date.now() };
+                                }
+                                el.play().catch(() => setIsPlaying(false));
+                            }
+                        }}
+                        className="w-10 h-10 flex-shrink-0 rounded-full bg-ink text-paper flex items-center justify-center hover:bg-sage transition-colors disabled:opacity-50"
+                        disabled={!proxyAudioUrl}
+                        title={proxyAudioUrl ? (isPlaying ? '暂停' : '播放') : '暂无音频'}
+                    >
+                        {isSeeking ? (
+                            <span className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                        ) : isPlaying ? (
+                            <Pause className="w-4 h-4" fill="currentColor" />
+                        ) : (
+                            <Play className="w-4 h-4 ml-0.5" fill="currentColor" />
+                        )}
+                    </button>
+                    <div className="flex-1 min-w-0">
                     <div
                         ref={progressBarRef}
-                        className="w-full h-3 bg-gray-200 rounded-full mb-2 cursor-pointer select-none relative"
+                        className="w-full h-2.5 bg-gray-200 rounded-full mb-1 cursor-pointer select-none relative"
                         onMouseDown={(e) => {
                             e.preventDefault();
                             e.stopPropagation();
@@ -533,73 +567,42 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
                     >
                         <div data-progress-fill className={`h-full bg-ink rounded-full pointer-events-none ${isDraggingProgress ? '' : 'transition-all duration-75'}`} style={{ width: `${proxyAudioUrl && audioDuration > 0 ? (audioCurrentTime / audioDuration) * 100 : progress}%` }} />
                     </div>
-                    <div className="flex justify-between text-xs font-mono text-subtext">
+                    <div className="flex justify-between text-[11px] font-mono text-subtext">
                         <span>{proxyAudioUrl && audioDuration > 0 ? formatMmSs(audioCurrentTime) : formatProgressTime(progress, parseDurationMinutes(podcast.duration))}</span>
                         <span>{proxyAudioUrl && audioDuration > 0 ? formatMmSs(audioDuration) : formatDuration(podcast.duration)}</span>
                     </div>
+                    </div>
                 </div>
+                {isSeeking && <p className="text-xs text-sage animate-pulse -mt-0.5 mb-0.5">加载中...</p>}
 
-                <div className="flex flex-col items-center mb-4">
-                    <button
-                        type="button"
-                        onClick={() => {
-                            const el = audioRef.current;
-                            if (!el || !proxyAudioUrl) return;
-                            if (isPlaying) {
-                                el.pause();
-                                setIsPlaying(false);
-                            } else {
-                                setIsPlaying(true);
-                                const dur = el.duration;
-                                const pct = progressRef.current;
-                                if (dur > 0 && isFinite(dur)) {
-                                    const targetTime = (pct / 100) * dur;
-                                    el.currentTime = targetTime;
-                                    setAudioCurrentTime(targetTime);
-                                    lastSeekRef.current = { pct, at: Date.now() };
-                                }
-                                el.play().catch(() => setIsPlaying(false));
-                            }
-                        }}
-                        className="w-14 h-14 rounded-full bg-ink text-paper flex items-center justify-center hover:bg-sage transition-colors disabled:opacity-50"
-                        disabled={!proxyAudioUrl}
-                        title={proxyAudioUrl ? (isPlaying ? '暂停' : '播放') : '暂无音频'}
-                    >
-                        {isSeeking ? (
-                            <span className="w-6 h-6 border-2 border-current border-t-transparent rounded-full animate-spin" />
-                        ) : isPlaying ? (
-                            <Pause className="w-6 h-6" fill="currentColor" />
-                        ) : (
-                            <Play className="w-6 h-6 ml-0.5" fill="currentColor" />
-                        )}
-                    </button>
-                    {isSeeking && <p className="text-xs text-sage animate-pulse mt-2">加载中...</p>}
-                </div>
-
-                 {/* Tab Switcher (Overview vs Transcript) */}
-                <div className="flex border-2 border-ink/10 rounded-lg p-1 bg-gray-50/50 mt-2">
+                 {/* Tab Switcher (Overview vs Transcript) - 以进度条为中轴，紧贴下方 */}
+                <div className="flex border-2 border-ink/10 rounded-lg p-0.5 bg-gray-50/50 mt-1.5">
                     <button 
                         onClick={() => setLeftTab('overview')}
-                        className={`flex-1 flex items-center justify-center gap-2 py-2 text-sm font-medium rounded-md transition-all ${leftTab === 'overview' ? 'bg-white shadow-sm text-ink border border-ink/10' : 'text-subtext hover:text-ink'}`}
+                        className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs font-medium rounded-md transition-all ${leftTab === 'overview' ? 'bg-white shadow-sm text-ink border border-ink/10' : 'text-subtext hover:text-ink'}`}
                     >
-                        <List className="w-4 h-4" /> 概览
+                        <List className="w-3.5 h-3.5" /> 概览
                     </button>
                     <button 
                          onClick={() => setLeftTab('transcript')}
-                         className={`flex-1 flex items-center justify-center gap-2 py-2 text-sm font-medium rounded-md transition-all ${leftTab === 'transcript' ? 'bg-white shadow-sm text-ink border border-ink/10' : 'text-subtext hover:text-ink'}`}
+                         className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs font-medium rounded-md transition-all ${leftTab === 'transcript' ? 'bg-white shadow-sm text-ink border border-ink/10' : 'text-subtext hover:text-ink'}`}
                     >
-                        <FileText className="w-4 h-4" /> 全文
+                        <FileText className="w-3.5 h-3.5" /> 全文
                     </button>
                 </div>
             </div>
 
-            {/* Content Area - 加 min-h-0 overflow-hidden 使内部可滚动 */}
-            <div className="flex-1 min-h-0 flex flex-col p-6 relative overflow-hidden">
+            {/* Content Area - 以进度条为中轴，概览/全文往上紧凑 */}
+            <div className="flex-1 min-h-0 flex flex-col px-6 pt-3 pb-6 relative overflow-hidden">
                 {leftTab === 'overview' ? (
                     <div className="space-y-4 animate-fade-in overflow-y-auto flex-1 min-h-0">
                         <section className="text-sm leading-relaxed text-ink/80 p-4 rounded-lg border border-ink/10 bg-card/30 text-justify">
                             {(() => {
-                            const raw = ensureOverviewStructure(stripHtmlForOverview(podcast.transcriptSummary || '') || '暂无节目简介');
+                            const src = podcast.transcriptSummary || '';
+                            const raw = ensureOverviewStructure(stripHtmlForOverview(src) || '暂无节目简介');
+                            // #region agent log
+                            if (src) { fetch('http://127.0.0.1:7242/ingest/8b5eb1f5-e3dc-4b71-ac73-fe8b2e3dde28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PlayerPage:overview',message:'Overview render',data:{srcLen:src.length,rawLen:raw.length,has4130:src.includes('41:30'),has4959:src.includes('49:19')},timestamp:Date.now(),hypothesisId:'H4'})}).catch(()=>{}); }
+                            // #endregion
                             const totalSec = Math.max(parseDurationMinutes(podcast.duration) * 60, 1);
                             const lines = raw.split(/\n/);
                             return lines.map((line, i) => {
@@ -789,8 +792,8 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
                                         )}
                                      </div>
                                      {editingNoteId === note.id ? (
-                                        <div className="mt-2">
-                                            <textarea value={editingContent} onChange={e => setEditingContent(e.target.value)} className="w-full text-sm border border-ink/20 rounded p-2 min-h-[60px]" rows={3} />
+                                        <div className="mt-2" onClick={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()}>
+                                            <textarea value={editingContent} onChange={e => setEditingContent(e.target.value)} autoFocus className="w-full text-sm border border-ink/20 rounded p-2 min-h-[60px] bg-white" rows={3} />
                                             <div className="flex justify-end gap-2 mt-2">
                                                 <button type="button" className="text-sm text-subtext" onClick={() => setEditingNoteId(null)}>取消</button>
                                                 <button type="button" className="text-sm bg-sage text-white px-3 py-1 rounded" onClick={() => { onUpdateNote?.(note.id, editingContent); setEditingNoteId(null); }}>保存</button>

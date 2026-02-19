@@ -19,7 +19,7 @@ const NotesPage: React.FC<Props> = ({ notes, podcasts, onBack, onSelectPodcast }
   };
 
   return (
-    <div className="h-full flex flex-col px-6 py-8 overflow-y-auto no-scrollbar bg-paper text-ink">
+    <div className="h-full flex flex-col px-6 py-8 overflow-y-auto no-scrollbar bg-paper text-ink w-full max-w-full">
       {/* Header */}
       <div className="mb-10">
         <button onClick={onBack} className="flex items-center gap-2 text-subtext hover:text-ink transition-colors mb-4 group">
@@ -33,7 +33,7 @@ const NotesPage: React.FC<Props> = ({ notes, podcasts, onBack, onSelectPodcast }
       <div>
         <h2 className="text-base font-sans text-ink mb-6">按节目浏览</h2>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 w-full max-w-full">
             {podcasts.map(podcast => {
                 const stats = getStats(podcast.id);
                 if (stats.count === 0) return null;
