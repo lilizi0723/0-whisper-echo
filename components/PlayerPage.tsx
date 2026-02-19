@@ -2,7 +2,6 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Podcast, Note, ChatMessage } from '../types';
 import { ArrowLeft, Play, Send, List, FileText, PenTool, Pencil, Trash2, Pause } from 'lucide-react';
 import { api } from '../services/api';
-import { MOCK_CHAT_HISTORY } from '../constants';
 
 const BULLETS = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩'];
 
@@ -105,6 +104,8 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const [localTranscribing, setLocalTranscribing] = useState(false);
   const [isDraggingProgress, setIsDraggingProgress] = useState(false);
+  const [isSeeking, setIsSeeking] = useState(false);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [selectionMenu, setSelectionMenu] = useState<{x: number, y: number, text: string} | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -114,6 +115,7 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
   const progressBarRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef<HTMLDivElement>(null);
   const noteInputRef = useRef<HTMLTextAreaElement>(null);
+  const lastSeekRef = useRef<{ pct: number; at: number } | null>(null);
 
   const audioUrl = podcast.audioUrl;
   // 3001 端口走 Vite 代理 /audio-proxy -> 8787
@@ -127,11 +129,12 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
     const rect = bar.getBoundingClientRect();
     const pct = Math.max(0, Math.min(100, ((clientX - rect.left) / rect.width) * 100));
     const el = audioRef.current;
-    setProgress(pct);
     progressRef.current = pct;
+    setProgress(pct);
     if (el && el.duration > 0 && syncAudio) {
       el.currentTime = (pct / 100) * el.duration;
       setAudioCurrentTime(el.currentTime);
+      lastSeekRef.current = { pct, at: Date.now() };
     }
   }, []);
 
@@ -147,17 +150,13 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
 
   useEffect(() => {
     if (chatHistory.length === 0) {
-      if (mode === 'player') {
-        setChatHistoryState([{
-          id: 'init',
-          role: 'model',
-          text: `欢迎来到 "${podcast.title}" 的听想空间。你可以随时问我关于本期节目的问题。`
-        }]);
-      } else {
-        setChatHistoryState(MOCK_CHAT_HISTORY);
-      }
+      setChatHistoryState([{
+        id: 'init',
+        role: 'model',
+        text: `欢迎来到 "${podcast.title}" 的听想空间。你可以随时问我关于本期节目的问题。`
+      }]);
     }
-  }, [podcast.id, mode, podcast.title]);
+  }, [podcast.id, podcast.title]);
 
   // 导入时自动转写：有音频但无文稿且未在转写中时，自动触发
   useEffect(() => {
@@ -183,19 +182,37 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
       setAudioCurrentTime(t);
       if (el.duration > 0) {
         const pct = (t / el.duration) * 100;
+        const last = lastSeekRef.current;
+        if (last) {
+          if (Date.now() - last.at < 15000 && (Math.abs(pct - last.pct) > 3 || (pct < 2 && last.pct > 1))) return;
+          if (Date.now() - last.at > 12000) lastSeekRef.current = null;
+        }
         setProgress(pct);
         progressRef.current = pct;
       }
     };
-    const onDurationChange = () => setAudioDuration(el.duration);
+    const onDurationChange = () => {
+      setAudioDuration(el.duration);
+      if (el.duration > 0 && progressRef.current > 0 && progressRef.current < 100) {
+        el.currentTime = (progressRef.current / 100) * el.duration;
+        setAudioCurrentTime(el.currentTime);
+        lastSeekRef.current = { pct: progressRef.current, at: Date.now() };
+      }
+    };
     const onEnded = () => setIsPlaying(false);
+    const onSeeking = () => setIsSeeking(true);
+    const onSeeked = () => setIsSeeking(false);
     el.addEventListener('timeupdate', onTimeUpdate);
     el.addEventListener('durationchange', onDurationChange);
     el.addEventListener('ended', onEnded);
+    el.addEventListener('seeking', onSeeking);
+    el.addEventListener('seeked', onSeeked);
     return () => {
       el.removeEventListener('timeupdate', onTimeUpdate);
       el.removeEventListener('durationchange', onDurationChange);
       el.removeEventListener('ended', onEnded);
+      el.removeEventListener('seeking', onSeeking);
+      el.removeEventListener('seeked', onSeeked);
     };
   }, [proxyAudioUrl, isDraggingProgress]);
 
@@ -257,7 +274,7 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
       const { text } = await api.ask({
         history: chatHistory.map(m => ({ role: m.role, text: m.text })),
         userMessage: userText,
-        transcriptSummary: (podcast.transcript || podcast.transcriptSummary || '').slice(0, 12000),
+        transcriptSummary: (podcast.transcript || podcast.transcriptSummary || ''),
       });
       setChatHistory(prev => [...prev, { id: (Date.now() + 1).toString(), role: 'model', text }]);
     } catch (err) {
@@ -332,14 +349,14 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
                             暂无笔记
                         </div>
                     ) : (
-                        existingNotes.map((note, idx) => (
+                        [...existingNotes].sort((a, b) => (parseInt(a.id, 10) || 0) - (parseInt(b.id, 10) || 0)).map((note, idx) => (
                             <div key={note.id} className="bg-white border border-ink/10 p-4 rounded-lg shadow-sm group">
                                 <div className="flex justify-between text-xs font-mono text-subtext mb-2">
                                     <span>{note.createdAt}</span>
                                     {(onUpdateNote || onDeleteNote) && (
                                         <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                                             {onUpdateNote && <button type="button" className="p-1 hover:bg-gray-100 rounded" title="编辑" onClick={() => { setEditingNoteId(note.id); setEditingContent(note.content); }}><Pencil className="w-3 h-3" /></button>}
-                                            {onDeleteNote && <button type="button" className="p-1 hover:bg-red-50 rounded text-red-600" title="删除" onClick={() => { if (window.confirm('确定删除这条笔记吗？')) onDeleteNote(note.id); }}><Trash2 className="w-3 h-3" /></button>}
+                                            {onDeleteNote && <button type="button" className="p-1 hover:bg-red-50 rounded text-red-600" title="删除" onClick={() => setDeleteConfirmId(note.id)}><Trash2 className="w-3 h-3" /></button>}
                                         </div>
                                     )}
                                 </div>
@@ -359,6 +376,17 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
                     )}
                </div>
            </div>
+           {deleteConfirmId && onDeleteNote && (
+             <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/20" onClick={() => setDeleteConfirmId(null)}>
+               <div className="bg-paper rounded-xl border-2 border-ink p-6 shadow-xl max-w-sm mx-4" onClick={e => e.stopPropagation()}>
+                 <p className="text-ink mb-4">确定删除这条笔记吗？</p>
+                 <div className="flex gap-3 justify-end">
+                   <button type="button" className="px-4 py-2 border border-ink/20 rounded-lg hover:bg-gray-100" onClick={() => setDeleteConfirmId(null)}>取消</button>
+                   <button type="button" className="px-4 py-2 bg-ink text-paper rounded-lg hover:bg-sage" onClick={() => { onDeleteNote(deleteConfirmId); setDeleteConfirmId(null); }}>确定删除</button>
+                 </div>
+               </div>
+             </div>
+           )}
         </div>
     );
   }
@@ -430,17 +458,34 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
                             e.preventDefault();
                             e.stopPropagation();
                             setIsDraggingProgress(true);
-                            applyProgressFromClientX(e.clientX);
-                            const onMouseMove = (ev: MouseEvent) => { ev.preventDefault(); applyProgressFromClientX(ev.clientX); };
+                            applyProgressFromClientX(e.clientX, false);
+                            let rafId = 0;
+                            const onMouseMove = (ev: MouseEvent) => {
+                                ev.preventDefault();
+                                if (rafId) cancelAnimationFrame(rafId);
+                                rafId = requestAnimationFrame(() => { applyProgressFromClientX(ev.clientX, false); rafId = 0; });
+                            };
                             const onMouseUp = () => {
                                 const el = audioRef.current;
-                                if (el && el.duration > 0) {
-                                  el.currentTime = (progressRef.current / 100) * el.duration;
-                                  setAudioCurrentTime(el.currentTime);
-                                }
-                                setIsDraggingProgress(false);
                                 document.removeEventListener('mousemove', onMouseMove);
                                 document.removeEventListener('mouseup', onMouseUp);
+                                if (el && el.duration > 0) {
+                                  const pct = progressRef.current;
+                                  const targetTime = (pct / 100) * el.duration;
+                                  el.currentTime = targetTime;
+                                  setAudioCurrentTime(targetTime);
+                                  lastSeekRef.current = { pct, at: Date.now() };
+                                  let tid: ReturnType<typeof setTimeout>;
+                                  const onSeeked = () => {
+                                    clearTimeout(tid);
+                                    el.removeEventListener('seeked', onSeeked);
+                                    setIsDraggingProgress(false);
+                                  };
+                                  el.addEventListener('seeked', onSeeked);
+                                  tid = setTimeout(() => { el.removeEventListener('seeked', onSeeked); setIsDraggingProgress(false); }, 500);
+                                } else {
+                                  setIsDraggingProgress(false);
+                                }
                             };
                             document.addEventListener('mousemove', onMouseMove);
                             document.addEventListener('mouseup', onMouseUp);
@@ -448,19 +493,35 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
                         onTouchStart={(e) => {
                             e.preventDefault();
                             const t = e.touches[0];
-                            if (t) { setIsDraggingProgress(true); applyProgressFromClientX(t.clientX); }
+                            if (t) { setIsDraggingProgress(true); applyProgressFromClientX(t.clientX, false); }
+                            let touchRaf = 0;
                             const onTouchMove = (ev: TouchEvent) => {
-                                if (ev.touches[0]) applyProgressFromClientX(ev.touches[0].clientX);
+                                const tx = ev.touches[0]?.clientX;
+                                if (tx == null) return;
+                                if (touchRaf) cancelAnimationFrame(touchRaf);
+                                touchRaf = requestAnimationFrame(() => { applyProgressFromClientX(tx, false); touchRaf = 0; });
                             };
                             const onTouchEnd = () => {
                                 const el = audioRef.current;
-                                if (el && el.duration > 0) {
-                                  el.currentTime = (progressRef.current / 100) * el.duration;
-                                  setAudioCurrentTime(el.currentTime);
-                                }
-                                setIsDraggingProgress(false);
                                 document.removeEventListener('touchmove', onTouchMove);
                                 document.removeEventListener('touchend', onTouchEnd);
+                                if (el && el.duration > 0) {
+                                  const pct = progressRef.current;
+                                  const targetTime = (pct / 100) * el.duration;
+                                  el.currentTime = targetTime;
+                                  setAudioCurrentTime(targetTime);
+                                  lastSeekRef.current = { pct, at: Date.now() };
+                                  let tid: ReturnType<typeof setTimeout>;
+                                  const onSeeked = () => {
+                                    clearTimeout(tid);
+                                    el.removeEventListener('seeked', onSeeked);
+                                    setIsDraggingProgress(false);
+                                  };
+                                  el.addEventListener('seeked', onSeeked);
+                                  tid = setTimeout(() => { el.removeEventListener('seeked', onSeeked); setIsDraggingProgress(false); }, 500);
+                                } else {
+                                  setIsDraggingProgress(false);
+                                }
                             };
                             document.addEventListener('touchmove', onTouchMove, { passive: true });
                             document.addEventListener('touchend', onTouchEnd);
@@ -478,34 +539,41 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
                     </div>
                 </div>
 
-                <div className="flex justify-center mb-4">
+                <div className="flex flex-col items-center mb-4">
                     <button
                         type="button"
                         onClick={() => {
                             const el = audioRef.current;
-                            if (el && proxyAudioUrl) {
-                                if (isPlaying) {
-                                    el.pause();
-                                } else {
-                                    if (el.duration > 0) {
-                                        el.currentTime = (progressRef.current / 100) * el.duration;
-                                        setAudioCurrentTime(el.currentTime);
-                                    }
-                                    el.play();
+                            if (!el || !proxyAudioUrl) return;
+                            if (isPlaying) {
+                                el.pause();
+                                setIsPlaying(false);
+                            } else {
+                                setIsPlaying(true);
+                                const dur = el.duration;
+                                const pct = progressRef.current;
+                                if (dur > 0 && isFinite(dur)) {
+                                    const targetTime = (pct / 100) * dur;
+                                    el.currentTime = targetTime;
+                                    setAudioCurrentTime(targetTime);
+                                    lastSeekRef.current = { pct, at: Date.now() };
                                 }
-                                setIsPlaying(!isPlaying);
+                                el.play().catch(() => setIsPlaying(false));
                             }
                         }}
                         className="w-14 h-14 rounded-full bg-ink text-paper flex items-center justify-center hover:bg-sage transition-colors disabled:opacity-50"
                         disabled={!proxyAudioUrl}
                         title={proxyAudioUrl ? (isPlaying ? '暂停' : '播放') : '暂无音频'}
                     >
-                        {isPlaying ? (
+                        {isSeeking ? (
+                            <span className="w-6 h-6 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                        ) : isPlaying ? (
                             <Pause className="w-6 h-6" fill="currentColor" />
                         ) : (
                             <Play className="w-6 h-6 ml-0.5" fill="currentColor" />
                         )}
                     </button>
+                    {isSeeking && <p className="text-xs text-sage animate-pulse mt-2">加载中...</p>}
                 </div>
 
                  {/* Tab Switcher (Overview vs Transcript) */}
@@ -555,7 +623,8 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
                                                         el.currentTime = sec;
                                                         setProgress(pct);
                                                         progressRef.current = pct;
-                                                        if (!isPlaying && el.duration > 0) { el.play(); setIsPlaying(true); }
+                                                        lastSeekRef.current = { pct, at: Date.now() };
+                                                        if (!isPlaying) { setIsPlaying(true); el.play().catch(() => setIsPlaying(false)); }
                                                     }
                                                 }}
                                                 className="text-sage font-mono hover:underline mb-1 block text-left cursor-pointer"
@@ -580,46 +649,41 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
                                 <p className="text-sm">正在转写中...</p>
                             </div>
                         ) : podcast.transcript ? (
-                            <div ref={transcriptRef} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden prose prose-sm max-w-none text-ink font-mono text-sm leading-relaxed space-y-2 text-justify">
+                            <div ref={transcriptRef} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden prose prose-sm max-w-none text-ink font-mono text-sm leading-relaxed text-justify">
                                 {(() => {
                                 const lines = podcast.transcript.split('\n').filter(l => l.trim());
-                                const totalSec = Math.max(parseDurationMinutes(podcast.duration) * 60, 1);
-                                let prevSpeaker: string | null = null;
-                                return lines.map((line, i) => {
+                                const blocks: string[] = [];
+                                let curBlock = '';
+                                let curSpeaker: string | null = null;
+                                for (const line of lines) {
                                     const tsMatch = line.match(/^\[(\d{1,2}:\d{2})\]\s*(Speaker\d+)?:?\s*(.*)$/);
                                     if (tsMatch) {
-                                        const [, ts, speaker, text] = tsMatch;
-                                        const sp = speaker || null;
-                                        const [mm, ss] = (ts || '0:0').split(':').map(Number);
-                                        const sec = (mm || 0) * 60 + (ss || 0);
-                                        const pct = (sec / totalSec) * 100;
-                                        const showSpeaker = sp !== prevSpeaker;
-                                        if (sp) prevSpeaker = sp;
-                                        return (
-                                            <div key={i} className="flex items-start gap-2 p-2 rounded hover:bg-sage/10 group">
-                                                <button
-                                                    type="button"
-                                                    onClick={() => {
-                                                        const el = audioRef.current;
-                                                        if (el && proxyAudioUrl) {
-                                                            el.currentTime = sec;
-                                                            setProgress(pct);
-                                                            progressRef.current = pct;
-                                                            if (!isPlaying && el.duration > 0) { el.play(); setIsPlaying(true); }
-                                                        }
-                                                    }}
-                                                    className="flex-shrink-0 text-sage font-mono text-xs hover:underline cursor-pointer"
-                                                >
-                                                    {ts && `[${ts}]`}
-                                                    {showSpeaker && sp && ` ${sp}:`}
-                                                </button>
-                                                <span className="select-text cursor-text text-ink flex-1 min-w-0">{text || line}</span>
-                                            </div>
-                                        );
+                                        const [, , speaker, text] = tsMatch;
+                                        const sp = speaker?.trim() || null;
+                                        const content = (text || '').trim();
+                                        const label = sp ? `${sp}: ` : '';
+                                        const MAX_SEGMENT = 150;
+                                        if (sp === curSpeaker && curBlock) {
+                                            if (curBlock.length + 1 + content.length <= MAX_SEGMENT) {
+                                                curBlock += ' ' + content;
+                                            } else {
+                                                blocks.push(curBlock);
+                                                curBlock = (sp ? `${sp}: ` : '') + content;
+                                            }
+                                        } else {
+                                            if (curBlock) blocks.push(curBlock);
+                                            curBlock = (sp ? `${sp}: ` : '') + content;
+                                            curSpeaker = sp;
+                                        }
+                                    } else {
+                                        if (curBlock) { blocks.push(curBlock); curBlock = ''; curSpeaker = null; }
+                                        if (line.trim()) blocks.push(line.trim());
                                     }
-                                    prevSpeaker = null;
-                                    return <p key={i} className="text-ink py-1">{line}</p>;
-                                });
+                                }
+                                if (curBlock) blocks.push(curBlock);
+                                return blocks.map((b, i) => (
+                                    <p key={i} className="mb-4 text-ink select-text cursor-text last:mb-0">{b}</p>
+                                ));
                                 })()}
                             </div>
                         ) : (
@@ -713,14 +777,14 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
                  <div className="h-full flex flex-col">
                      <div className="flex-1 space-y-4 mb-4">
                         {existingNotes.length === 0 ? null : (
-                            [...existingNotes].reverse().map((note, idx) => (
+                            [...existingNotes].sort((a, b) => (parseInt(a.id, 10) || 0) - (parseInt(b.id, 10) || 0)).map((note, idx) => (
                                 <div key={note.id} className="group relative pl-4 border-l-2 border-sage/30 hover:border-sage transition-colors">
                                      <div className="flex justify-between items-baseline mb-1">
                                         <span className="text-[10px] text-subtext">{note.createdAt}</span>
                                         {(onUpdateNote || onDeleteNote) && (
                                             <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                                                 {onUpdateNote && <button type="button" className="p-1 hover:bg-gray-100 rounded" title="编辑" onClick={() => { setEditingNoteId(note.id); setEditingContent(note.content); }}><Pencil className="w-3 h-3" /></button>}
-                                                {onDeleteNote && <button type="button" className="p-1 hover:bg-red-50 rounded text-red-600" title="删除" onClick={() => { if (window.confirm('确定删除这条笔记吗？')) onDeleteNote(note.id); }}><Trash2 className="w-3 h-3" /></button>}
+                                                {onDeleteNote && <button type="button" className="p-1 hover:bg-red-50 rounded text-red-600" title="删除" onClick={() => setDeleteConfirmId(note.id)}><Trash2 className="w-3 h-3" /></button>}
                                             </div>
                                         )}
                                      </div>
@@ -800,6 +864,17 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
              )}
          </div>
       </div>
+      {deleteConfirmId && onDeleteNote && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/20" onClick={() => setDeleteConfirmId(null)}>
+          <div className="bg-paper rounded-xl border-2 border-ink p-6 shadow-xl max-w-sm mx-4" onClick={e => e.stopPropagation()}>
+            <p className="text-ink mb-4">确定删除这条笔记吗？</p>
+            <div className="flex gap-3 justify-end">
+              <button type="button" className="px-4 py-2 border border-ink/20 rounded-lg hover:bg-gray-100" onClick={() => setDeleteConfirmId(null)}>取消</button>
+              <button type="button" className="px-4 py-2 bg-ink text-paper rounded-lg hover:bg-sage" onClick={() => { onDeleteNote(deleteConfirmId); setDeleteConfirmId(null); }}>确定删除</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

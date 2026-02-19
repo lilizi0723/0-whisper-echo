@@ -1,4 +1,5 @@
 import http from 'http';
+import { Readable } from 'stream';
 import crypto from 'crypto';
 
 const PORT = 8787;
@@ -13,7 +14,7 @@ function stripHtml(s) {
 }
 function extractCdataOrText(s) {
   if (!s || typeof s !== 'string') return '';
-  const cdata = s.match(/<!\[CDATA\[([\s\S]*?)\]\]>/);
+  const cdata = s.match(/<!\[CDATA\[([\s\S]*)\]\]>/);
   if (cdata) return cdata[1].replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
   return stripHtml(s);
 }
@@ -58,7 +59,7 @@ function parseRssXml(text, feedUrl = '') {
     const encMatch = block.match(/<enclosure[^>]+url=["']([^"']+)["'][^>]*>/i) || block.match(/<enclosure[^>]+url=["']([^"']+)["']/i);
     const durMatch = block.match(/<itunes:duration[^>]*>([^<]+)<\/itunes:duration>/i);
     const itemImgMatch = block.match(/<itunes:image[^>]+href=["']([^"']+)["']/i) || block.match(/<media:thumbnail[^>]+url=["']([^"']+)["']/i);
-    const descMatch = block.match(/<description[^>]*>([\s\S]*?)<\/description>/i) || block.match(/<content:encoded[^>]*>([\s\S]*?)<\/content:encoded>/i) || block.match(/<itunes:summary[^>]*>([\s\S]*?)<\/itunes:summary>/i);
+    const descMatch = block.match(/<description[^>]*>([\s\S]*)<\/description>/i) || block.match(/<content:encoded[^>]*>([\s\S]*)<\/content:encoded>/i) || block.match(/<itunes:summary[^>]*>([\s\S]*)<\/itunes:summary>/i);
     const pubDate = pubMatch ? pubMatch[1].trim() : '';
     let audioUrl = encMatch ? encMatch[1].trim() : null;
     if (audioUrl && feedUrl) audioUrl = resolveUrl(feedUrl, audioUrl);
@@ -67,7 +68,7 @@ function parseRssXml(text, feedUrl = '') {
     const coverImage = itemImgMatch ? itemImgMatch[1].trim() : feedImage;
     const rawDesc = descMatch ? descMatch[1] : '';
     let contentSnippet = rawDesc ? (extractCdataOrText(rawDesc) || stripHtml(rawDesc)) : '';
-    contentSnippet = contentSnippet.replace(/\]\]\s*>/g, '').slice(0, 2000);
+    contentSnippet = contentSnippet.replace(/\]\]\s*>/g, '');
     episodes.push({ index: idx, title, pubDate, audioUrl, duration: duration || null, coverImageUrl: coverImage || null, contentSnippet: contentSnippet || null });
     idx++;
   }
@@ -175,12 +176,11 @@ const server = http.createServer(async (req, res) => {
         { role: 'system', content: `你是一个播客内容助手。请根据用户提供的节目内容回答问题。
 
 回答格式要求（必须遵守）：
-1. 分点回答，每条前加数字序号，如：1. xxx  2. xxx  3. xxx
-2. 多要点时用数字列表，结构清晰
-3. 段落之间空一行
-4. 不要使用 * ** # 等 markdown 符号
-5. 使用简洁清晰的中文
-6. 先概括再展开，或先列要点再补充说明
+1. 一级要点用 1. 2. 3. 格式
+2. 每个一级要点下如需分点阐述，用 (1) (2) (3) 格式
+3. 示例：1. 第一点 (1) 子要点一 (2) 子要点二
+4. 段落之间空一行，不要使用 * ** # 等 markdown 符号
+5. 使用简洁清晰的中文，先概括再展开
 
 参考内容（可能是逐字稿或概览）：\n${transcriptSummary}` },
         ...history.map((m) => ({ role: m.role === 'model' ? 'assistant' : 'user', content: String(m.text || '') })),
@@ -325,8 +325,7 @@ const server = http.createServer(async (req, res) => {
         if (contentLength) res.setHeader('Content-Length', contentLength);
         res.writeHead(200, { 'Content-Type': ct });
       }
-      const buf = await upstream.arrayBuffer();
-      res.end(Buffer.from(buf));
+      Readable.fromWeb(upstream.body).pipe(res);
     } catch (e) {
       if (!res.headersSent) {
         res.writeHead(502, { 'Content-Type': 'application/json' });

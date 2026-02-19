@@ -1,4 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
+
+if (typeof window !== 'undefined' && window.location.hostname === '127.0.0.1') {
+  window.location.replace(`http://localhost:${window.location.port || 3001}${window.location.pathname}${window.location.search}`);
+}
 import { ViewState, Podcast, Note } from './types';
 import { api } from './services/api';
 
