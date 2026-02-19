@@ -1,9 +1,7 @@
 export const API_BASE = '';
 
 function getBaseUrl(): string {
-  if (typeof window !== 'undefined' && window.location.port === '3001') {
-    return `http://${window.location.hostname}:8787`;
-  }
+  // 3001 端口时走 Vite 代理，保持同源，不直接连 8787
   return API_BASE || '';
 }
 
@@ -16,8 +14,14 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     headers: { 'Content-Type': 'application/json', ...options?.headers },
   });
   if (!res.ok) {
-    const err = await res.text();
-    throw new Error(err || res.statusText);
+    const text = await res.text();
+    try {
+      const j = JSON.parse(text);
+      if (j && typeof j.error === 'string') throw new Error(j.error);
+    } catch (e) {
+      if (e instanceof Error && !(e instanceof SyntaxError)) throw e;
+    }
+    throw new Error(text || res.statusText);
   }
   return res.json();
 }
@@ -36,7 +40,7 @@ export const api = {
 
   async previewRss(rssUrl: string): Promise<{
     showName: string;
-    episodes: { index: number; title: string; pubDate: string; audioUrl?: string | null }[];
+    episodes: { index: number; title: string; pubDate: string; audioUrl?: string | null; duration?: string; coverImageUrl?: string | null; contentSnippet?: string | null }[];
   }> {
     return request(`/api/rss/preview?url=${encodeURIComponent(rssUrl)}`);
   },

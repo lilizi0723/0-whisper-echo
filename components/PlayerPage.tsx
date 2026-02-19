@@ -10,6 +10,32 @@ function stripNoteTimestamp(content: string): string {
   return content.replace(/^(\s*>\s*)?\[\d{1,2}:\d{2}\]\s*/, '').trim();
 }
 
+/** 移除概览中的 HTML 标签，保留换行和分段 */
+function stripHtmlForOverview(s: string): string {
+  if (!s || typeof s !== 'string') return '';
+  return s
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#39;/g, "'")
+    .replace(/\]\]\s*>/g, '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/** 在每个数字时间戳（如 5:21、12:47）前插入换行，使每个时间点独占一行并可点击跳转 */
+function ensureOverviewStructure(s: string): string {
+  if (!s || typeof s !== 'string') return '';
+  return s
+    .replace(/(.)(🟢\s*\d{1,2}:\d{2})/g, '$1\n\n$2')
+    .replace(/([^\n])(\d{1,2}:\d{2})(?=\s|$)/g, (_, before, ts) => before ? before + '\n\n' + ts : ts)
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 interface Props {
   podcast: Podcast;
   existingNotes: Note[];
@@ -87,13 +113,12 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
   const chatEndRef = useRef<HTMLDivElement>(null);
   const progressBarRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef<HTMLDivElement>(null);
+  const noteInputRef = useRef<HTMLTextAreaElement>(null);
 
   const audioUrl = podcast.audioUrl;
-  const backendBase = typeof window !== 'undefined' && window.location.port === '3001'
-    ? `http://${window.location.hostname}:8787`
-    : '';
+  // 3001 端口走 Vite 代理 /audio-proxy -> 8787
   const proxyAudioUrl = audioUrl && audioUrl.startsWith('http')
-    ? (backendBase ? `${backendBase}/audio-proxy?url=${encodeURIComponent(audioUrl)}` : `/api/audio-proxy?url=${encodeURIComponent(audioUrl)}`)
+    ? `/audio-proxy?url=${encodeURIComponent(audioUrl)}`
     : null;
 
   const applyProgressFromClientX = useCallback((clientX: number, syncAudio = true) => {
@@ -133,6 +158,16 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
       }
     }
   }, [podcast.id, mode, podcast.title]);
+
+  // 导入时自动转写：有音频但无文稿且未在转写中时，自动触发
+  useEffect(() => {
+    if (mode !== 'player' || !podcast.audioUrl || podcast.transcript || isTranscribing || localTranscribing) return;
+    setLocalTranscribing(true);
+    api.transcribe(podcast.id, podcast.audioUrl)
+      .then(t => { if (t) onUpdateTranscript?.(podcast.id, t); })
+      .catch(() => {})
+      .finally(() => setLocalTranscribing(false));
+  }, [podcast.id, podcast.audioUrl, podcast.transcript, mode, isTranscribing, onUpdateTranscript]);
 
   useEffect(() => {
     return () => { onUpdateProgress(podcast.id, progressRef.current); };
@@ -203,21 +238,11 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
 
   const handleAddToNotes = () => {
     if (selectionMenu) {
-      const timeMatch = selectionMenu.text.match(/\[(\d{2}:\d{2})\]/);
-      let timestamp: string;
-      if (timeMatch) {
-        timestamp = timeMatch[1];
-      } else {
-        const totalSeconds = parseInt(podcast.duration || '0') * 60;
-        const currentSeconds = totalSeconds * (progress / 100);
-        const m = Math.floor(currentSeconds / 60);
-        const s = Math.floor(currentSeconds % 60);
-        timestamp = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-      }
-      const contentPrefix = timeMatch ? '' : `[${timestamp}] `;
-      const textToAdd = `> ${contentPrefix}${selectionMenu.text}\n\n`;
+      const textToAdd = `> ${selectionMenu.text}\n\n`;
       setNoteInput(prev => prev ? prev + '\n' + textToAdd : textToAdd);
+      setActiveTab('notes');
       setSelectionMenu(null);
+      setTimeout(() => noteInputRef.current?.focus(), 100);
     }
   };
 
@@ -500,59 +525,102 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
                 </div>
             </div>
 
-            {/* Content Area */}
-            <div className="flex-1 p-6 relative">
+            {/* Content Area - 加 min-h-0 overflow-hidden 使内部可滚动 */}
+            <div className="flex-1 min-h-0 flex flex-col p-6 relative overflow-hidden">
                 {leftTab === 'overview' ? (
-                    <div className="space-y-4 animate-fade-in">
-                        <section>
-                            <p className="text-sm leading-relaxed text-ink/80 whitespace-pre-line p-4 rounded-lg border border-ink/10 bg-card/30">
-                                {(podcast.transcriptSummary || '暂无节目简介').replace(/\]\]\s*>/g, '')}
-                            </p>
+                    <div className="space-y-4 animate-fade-in overflow-y-auto flex-1 min-h-0">
+                        <section className="text-sm leading-relaxed text-ink/80 p-4 rounded-lg border border-ink/10 bg-card/30 text-justify">
+                            {(() => {
+                            const raw = ensureOverviewStructure(stripHtmlForOverview(podcast.transcriptSummary || '') || '暂无节目简介');
+                            const totalSec = Math.max(parseDurationMinutes(podcast.duration) * 60, 1);
+                            const lines = raw.split(/\n/);
+                            return lines.map((line, i) => {
+                                const tsBracket = line.match(/^(\s*)\[(\d{1,2}:\d{2})\]\s*(.*)$/);
+                                const tsWithEmoji = line.match(/^(\s*)(🟢\s*)?(\d{1,2}:\d{2})(?:\s+(.*))?$/);
+                                const tsPlain = line.match(/^(\s*)(\d{1,2}:\d{2})(?:\s+(.*))?$/);
+                                const m = tsBracket || tsWithEmoji || tsPlain;
+                                if (m) {
+                                    const ts = tsWithEmoji ? m[3] : (m[2] || '');
+                                    const rest = (tsWithEmoji ? (m[4] || '') : (m[3] || '')).trim();
+                                    const [mm, ss] = ts.split(':').map(Number);
+                                    const sec = (mm || 0) * 60 + (ss || 0);
+                                    const pct = (sec / totalSec) * 100;
+                                    return (
+                                        <div key={i} className="mb-3">
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    const el = audioRef.current;
+                                                    if (el && proxyAudioUrl) {
+                                                        el.currentTime = sec;
+                                                        setProgress(pct);
+                                                        progressRef.current = pct;
+                                                        if (!isPlaying && el.duration > 0) { el.play(); setIsPlaying(true); }
+                                                    }
+                                                }}
+                                                className="text-sage font-mono hover:underline mb-1 block text-left cursor-pointer"
+                                            >
+                                                {tsWithEmoji && m[2] ? '🟢 ' : ''}{ts}
+                                            </button>
+                                            {rest ? <p className="whitespace-pre-line">{rest}</p> : null}
+                                        </div>
+                                    );
+                                }
+                                if (line.trim()) return <p key={i} className="mb-3 whitespace-pre-line">{line}</p>;
+                                return <div key={i} className="h-2" />;
+                            });
+                            })()}
                         </section>
                     </div>
                 ) : (
-                    <div className="animate-fade-in">
+                    <div className="flex-1 min-h-0 flex flex-col animate-fade-in overflow-hidden">
                         {(isTranscribing || localTranscribing) ? (
-                            <div className="flex flex-col items-center justify-center py-12 text-subtext">
+                            <div className="flex flex-col items-center justify-center py-12 text-subtext flex-shrink-0">
                                 <div className="w-10 h-10 border-2 border-sage border-t-transparent rounded-full animate-spin mb-3" />
                                 <p className="text-sm">正在转写中...</p>
                             </div>
                         ) : podcast.transcript ? (
-                            <div ref={transcriptRef} className="prose prose-sm max-w-none text-ink font-mono text-sm leading-relaxed space-y-2 overflow-y-auto">
-                                {podcast.transcript.split('\n').filter(l => l.trim()).map((line, i) => {
-                                    const tsMatch = line.match(/^\[(\d{1,2}:\d{2})\]\s*(Speaker\d+)?:?\s*(.+)$/);
+                            <div ref={transcriptRef} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden prose prose-sm max-w-none text-ink font-mono text-sm leading-relaxed space-y-2 text-justify">
+                                {(() => {
+                                const lines = podcast.transcript.split('\n').filter(l => l.trim());
+                                const totalSec = Math.max(parseDurationMinutes(podcast.duration) * 60, 1);
+                                let prevSpeaker: string | null = null;
+                                return lines.map((line, i) => {
+                                    const tsMatch = line.match(/^\[(\d{1,2}:\d{2})\]\s*(Speaker\d+)?:?\s*(.*)$/);
                                     if (tsMatch) {
                                         const [, ts, speaker, text] = tsMatch;
-                                        const [m, s] = ts.split(':').map(Number);
-                                        const sec = (m || 0) * 60 + (s || 0);
-                                        const totalSec = Math.max(parseDurationMinutes(podcast.duration) * 60, 1);
+                                        const sp = speaker || null;
+                                        const [mm, ss] = (ts || '0:0').split(':').map(Number);
+                                        const sec = (mm || 0) * 60 + (ss || 0);
                                         const pct = (sec / totalSec) * 100;
+                                        const showSpeaker = sp !== prevSpeaker;
+                                        if (sp) prevSpeaker = sp;
                                         return (
-                                            <button
-                                                key={i}
-                                                type="button"
-                                                className="block w-full text-left hover:bg-sage/10 p-2 rounded transition-colors"
-                                                onClick={() => {
-                                                    const el = audioRef.current;
-                                                    if (el && proxyAudioUrl && el.duration > 0) {
-                                                        el.currentTime = sec;
-                                                        setProgress(pct);
-                                                        progressRef.current = pct;
-                                                        if (!isPlaying) {
-                                                            el.play();
-                                                            setIsPlaying(true);
+                                            <div key={i} className="flex items-start gap-2 p-2 rounded hover:bg-sage/10 group">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        const el = audioRef.current;
+                                                        if (el && proxyAudioUrl) {
+                                                            el.currentTime = sec;
+                                                            setProgress(pct);
+                                                            progressRef.current = pct;
+                                                            if (!isPlaying && el.duration > 0) { el.play(); setIsPlaying(true); }
                                                         }
-                                                    }
-                                                }}
-                                            >
-                                                <span className="text-sage font-mono text-xs mr-2">[{ts}]</span>
-                                                {speaker && <span className="text-subtext text-xs mr-2">{speaker}</span>}
-                                                <span className="text-ink">{text || line}</span>
-                                            </button>
+                                                    }}
+                                                    className="flex-shrink-0 text-sage font-mono text-xs hover:underline cursor-pointer"
+                                                >
+                                                    {ts && `[${ts}]`}
+                                                    {showSpeaker && sp && ` ${sp}:`}
+                                                </button>
+                                                <span className="select-text cursor-text text-ink flex-1 min-w-0">{text || line}</span>
+                                            </div>
                                         );
                                     }
+                                    prevSpeaker = null;
                                     return <p key={i} className="text-ink py-1">{line}</p>;
-                                })}
+                                });
+                                })()}
                             </div>
                         ) : (
                             <div className="text-center text-subtext py-10">
@@ -675,6 +743,7 @@ const PlayerPage: React.FC<Props> = ({ podcast, existingNotes, onBack, onSaveNot
                      {/* Input Area */}
                      <form onSubmit={handleNoteSubmit} className="mt-auto bg-white border border-ink/10 rounded-xl p-3 shadow-sm focus-within:ring-1 focus-within:ring-sage focus-within:border-sage transition-all">
                         <textarea 
+                            ref={noteInputRef}
                             value={noteInput}
                             onChange={e => setNoteInput(e.target.value)}
                             placeholder="记录当下的想法..."

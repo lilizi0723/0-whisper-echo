@@ -93,8 +93,8 @@ function parseXfyunResult(orderResult) {
         try { j = JSON.parse(j); } catch { continue; }
       }
       const st = j?.st || j;
-      const rl = (st && st.rl) || item.rl || '0';
-      const speaker = 'Speaker' + (parseInt(String(rl), 10) + 1);
+      const rl = (st && st.rl) || item.rl || '1';
+      const speaker = 'Speaker' + Math.max(1, parseInt(String(rl), 10));
       const m = Math.floor(bg / 60000);
       const s = Math.floor((bg % 60000) / 1000);
       const tsStr = `${m}:${s.toString().padStart(2, '0')}`;
@@ -223,9 +223,9 @@ const server = http.createServer(async (req, res) => {
 
   if ((url.pathname === '/transcribe' || url.pathname === '/api/transcribe') && req.method === 'POST') {
     let body = '';
-    for await (const chunk of req) body += chunk;
+    try { for await (const chunk of req) body += chunk; } catch (e) { console.error('[transcribe] read body:', e?.message); }
     try {
-      const data = JSON.parse(body || '{}');
+      const data = typeof body === 'string' && body.trim() ? JSON.parse(body) : {};
       const audioUrl = data.audioUrl;
       console.log('[transcribe] audioUrl:', audioUrl?.slice(0, 80));
       if (!audioUrl || !audioUrl.startsWith('http')) {
@@ -270,8 +270,12 @@ const server = http.createServer(async (req, res) => {
       }
       throw new Error('转写超时，请稍后重试');
     } catch (e) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message || '转写失败' }));
+      const msg = (e && typeof e.message === 'string' ? e.message : String(e)) || '转写失败';
+      console.error('[transcribe] error:', msg);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: msg }));
+      }
     }
     return;
   }
@@ -324,8 +328,10 @@ const server = http.createServer(async (req, res) => {
       const buf = await upstream.arrayBuffer();
       res.end(Buffer.from(buf));
     } catch (e) {
-      res.writeHead(502, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Audio fetch failed' }));
+      if (!res.headersSent) {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Audio fetch failed' }));
+      }
     }
     return;
   }

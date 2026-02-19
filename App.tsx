@@ -105,9 +105,8 @@ const App: React.FC = () => {
 
   const handleUpdateTranscript = (id: string, transcript: string) => {
     setPodcasts(prev => prev.map(p => p.id === id ? { ...p, transcript } : p));
-    if (selectedPodcast?.id === id) {
-      setSelectedPodcast(prev => prev ? { ...prev, transcript } : null);
-    }
+    // 使用函数式更新，避免闭包导致 selectedPodcast 不更新（转写可能很久才完成）
+    setSelectedPodcast(prev => prev?.id === id ? { ...prev, transcript } : prev);
   };
 
   const handleUpdateProgress = useCallback((id: string, progress: number) => {
