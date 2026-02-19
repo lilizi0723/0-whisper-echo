@@ -153,7 +153,11 @@ const PodcastListPage: React.FC<Props> = ({
                               setRssShowName(list.showName);
                               setRssEpisodes(list.episodes || []);
                             } catch (e: unknown) {
-                              setRssError(e instanceof Error ? e.message : '无法解析该RSS链接，请确认链接是否正确且为有效的播客feed');
+                              const msg = e instanceof Error ? e.message : String(e);
+                              const is404 = /not be found|NOT_FOUND|404/i.test(msg);
+                              setRssError(is404
+                                ? '线上版本暂不支持 RSS 导入。请在本机运行前后端后访问 http://localhost:3001 使用完整功能。'
+                                : msg || '无法解析该RSS链接，请确认链接是否正确且为有效的播客feed');
                             } finally {
                               setRssLoading(false);
                             }
@@ -215,10 +219,6 @@ const PodcastListPage: React.FC<Props> = ({
                                   audioUrl: epAny.audioUrl ?? null,
                                   coverImageUrl: epAny.coverImageUrl ?? null,
                                 };
-
-                                // #region agent log
-                                fetch('http://127.0.0.1:7242/ingest/8b5eb1f5-e3dc-4b71-ac73-fe8b2e3dde28',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PodcastListPage:import',message:'Frontend import',data:{tsLen:ts.length,has4130:ts.includes('41:30'),has4959:ts.includes('49:19')},timestamp:Date.now(),hypothesisId:'H3'})}).catch(()=>{});
-                                // #endregion
 
                                 // 2. 同步写入父组件 state（会触发 localStorage 持久化）
                                 onPodcastImported(newPodcast);
